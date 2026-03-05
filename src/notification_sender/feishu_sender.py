@@ -29,6 +29,8 @@ class FeishuSender:
         self._feishu_url = getattr(config, 'feishu_webhook_url', None)
         self._feishu_max_bytes = getattr(config, 'feishu_max_bytes', 20000)
         self._webhook_verify_ssl = getattr(config, 'webhook_verify_ssl', True)
+        # 飞书关键字验证配置
+        self._feishu_keywords = getattr(config, 'feishu_keywords', '股票,分析') or '股票,分析'
     
           
     def send_to_feishu(self, content: str) -> bool:
@@ -57,9 +59,15 @@ class FeishuSender:
         if not self._feishu_url:
             logger.warning("飞书 Webhook 未配置，跳过推送")
             return False
-        
+
+        # 添加关键字以通过飞书安全验证
+        keywords = [k.strip() for k in self._feishu_keywords.split(',') if k.strip()]
+        keyword_prefix = ' '.join(keywords) + ' '
+
         # 飞书 lark_md 支持有限，先做格式转换
         formatted_content = format_feishu_markdown(content)
+        # 在内容前添加关键字（飞书关键字验证需要）
+        formatted_content = keyword_prefix + formatted_content
 
         max_bytes = self._feishu_max_bytes  # 从配置读取，默认 20000 字节
         
