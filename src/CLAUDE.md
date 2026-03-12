@@ -2,7 +2,7 @@
 
 ## 核心业务模块
 
-> 更新时间：2026-03-10 12:00:00
+> 更新时间：2026-03-12 10:00:00
 
 ### 模块职责
 
@@ -163,6 +163,12 @@ pytest tests/test_market_analyzer_generate_text.py -v
 - 测试目录：`/Users/berton/Github/daily_stock_analysis/tests/`
 
 ### 变更记录
+
+#### 2026-03-12 - SearXNG 搜索与筹码结构兜底
+- **搜索服务增强**: `src/search_service.py` 新增 SearXNG 支持（配额免费兜底选项）
+- **analyzer 增强**: 新增筹码结构 (`chip_structure`) 兜底补全逻辑
+- **配置管理**: `src/config.py` 新增 GitHub Actions 相关配置
+- **测试**: 新增 `test_chip_structure_fallback.py` 和 `test_search_searxng.py`
 
 #### 2026-03-10 - 报告引擎 P0 与智能导入
 - **新增模块**:

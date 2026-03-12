@@ -1,6 +1,6 @@
 # 股票智能分析系统 (Daily Stock Analysis)
 
-> 更新时间：2026-03-10 12:00:00
+> 更新时间：2026-03-12 10:00:00
 
 ## 项目愿景
 
@@ -204,7 +204,9 @@ tests/
 ├── test_report_integrity.py    # 报告完整性测试
 ├── test_report_renderer.py     # 报告渲染器测试
 ├── test_report_schema.py       # 报告 Schema 测试
-└── test_stock_code_utils.py    # 股票代码工具测试
+├── test_stock_code_utils.py    # 股票代码工具测试
+├── test_chip_structure_fallback.py  # 筹码结构兜底测试
+└── test_search_searxng.py      # SearXNG 搜索测试
 ```
 
 ### 运行测试
@@ -375,6 +377,16 @@ pip install flake8 pytest
 - 配置 LLM 渠道：使用 Web 界面的 LLMChannelEditor 组件或 litellm_config.yaml
 
 ## 变更记录
+
+### 2026-03-12 10:00:00 - 同步 upstream (latest)
+- **SearXNG 搜索支持**: 新增配额免费的搜索提供者，优先级最低作为兜底选项
+- **GitHub Actions LiteLLM 配置**: 工作流支持 `litellm_config.yaml` 文件提交或 Variables/Secret 方式配置
+- **筹码结构兜底补全**: DeepSeek 等模型未填写 `chip_structure` 时自动用数据源数据补全
+- **MiniMax 搜索状态**: `/status` 命令新增 MiniMax 搜索状态显示
+- **LLM 配置指南重构**: 更清晰易读的文档结构
+- **搜索服务增强**: `src/search_service.py` 大幅扩展，新增 SearXNG 支持
+- **飞书通知简化**: 删除过时的 `feishu_notification_fix.md` 文档
+- **测试增强**: 新增 2 个测试文件（chip_structure_fallback, search_searxng）
 
 ### 2026-03-10 12:00:00 - 同步 upstream v3.4.11
 - **报告引擎 P0**: Pydantic schema 验证、Jinja2 模板渲染、内容完整性校验
