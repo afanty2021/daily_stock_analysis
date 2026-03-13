@@ -2,7 +2,7 @@
 
 ## 核心业务模块
 
-> 更新时间：2026-03-12 10:00:00
+> 更新时间：2026-03-13 08:00:00
 
 ### 模块职责
 
@@ -163,6 +163,14 @@ pytest tests/test_market_analyzer_generate_text.py -v
 - 测试目录：`/Users/berton/Github/daily_stock_analysis/tests/`
 
 ### 变更记录
+
+#### 2026-03-13 - 配置引擎重构与数据源韧性 (v3.5.0)
+- **配置引擎重构**: `src/core/config_manager.py` 大幅扩展，统一配置管理
+- **Agent 模型服务**: `src/services/agent_model_service.py` 新增模型发现 API
+- **历史服务增强**: `src/services/history_service.py` 大幅扩展，支持 Markdown 报告导出
+- **股票映射增强**: `src/data/stock_mapping.py` 新增 STOOQ 映射
+- **Agent 工具增强**: `src/agent/tools/analysis_tools.py` analyze_trend 修复
+- **测试**: 新增 `test_config_manager.py` 和 `test_agent_models_api.py`
 
 #### 2026-03-12 - SearXNG 搜索与筹码结构兜底
 - **搜索服务增强**: `src/search_service.py` 新增 SearXNG 支持（配额免费兜底选项）

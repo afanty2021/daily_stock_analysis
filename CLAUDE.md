@@ -1,6 +1,6 @@
 # 股票智能分析系统 (Daily Stock Analysis)
 
-> 更新时间：2026-03-12 10:00:00
+> 更新时间：2026-03-13 08:00:00
 
 ## 项目愿景
 
@@ -206,7 +206,10 @@ tests/
 ├── test_report_schema.py       # 报告 Schema 测试
 ├── test_stock_code_utils.py    # 股票代码工具测试
 ├── test_chip_structure_fallback.py  # 筹码结构兜底测试
-└── test_search_searxng.py      # SearXNG 搜索测试
+├── test_search_searxng.py      # SearXNG 搜索测试
+├── test_agent_models_api.py    # Agent 模型 API 测试
+├── test_config_manager.py      # 配置管理器测试
+└── test_stooq_fallback.py      # Stooq 回退测试
 ```
 
 ### 运行测试
@@ -377,6 +380,18 @@ pip install flake8 pytest
 - 配置 LLM 渠道：使用 Web 界面的 LLMChannelEditor 组件或 litellm_config.yaml
 
 ## 变更记录
+
+### 2026-03-13 08:00:00 - 同步 upstream v3.5.0
+- **配置引擎重构 (#602)**: 统一配置注册表、验证和 API 暴露
+- **数据源韧性增强**: 回退链优化，YFinance 获取器大幅增强（Stooq 回退、美股支持）
+- **Agent 模型发现 API**: `GET /api/v1/agent/models` 返回可用模型部署
+- **Web UI 完整报告**: 历史页面新增「完整报告」按钮，侧边抽屉显示 Markdown
+- **analyze_trend 修复 (#600)**: 从 DB/DataFetcher 获取数据，不再报告无历史数据
+- **Stooq 美股昨收语义修复**: 不再错误使用开盘价作为昨收
+- **股票名称预取修复**: 优先使用本地 `STOCK_NAME_MAP`
+- **.env 保存优化**: Web 设置不再破坏注释和空行格式
+- **新增服务**: `src/services/agent_model_service.py`
+- **新增测试**: 3 个新测试文件（agent_models_api, config_manager, stooq_fallback）
 
 ### 2026-03-12 10:00:00 - 同步 upstream (latest)
 - **SearXNG 搜索支持**: 新增配额免费的搜索提供者，优先级最低作为兜底选项
