@@ -381,6 +381,57 @@ pip install flake8 pytest
 
 ## 变更记录
 
+### 2026-03-16 14:20:00 - 同步 upstream v3.7.0
+- **💼 持仓管理 P0 全功能上线**（#677，对应 Issue #627）
+  - 核心账本与快照闭环：账户、交易、现金流水、企业行为、持仓缓存、每日快照
+  - 券商 CSV 导入：华泰/中信/招商首批适配，支持两阶段接口和幂等去重
+  - 组合风险报告：集中度风险、历史回撤监控、止损接近预警
+  - Web 持仓页（`/portfolio`）：组合总览、持仓明细、风险摘要
+  - Agent 持仓工具：`get_portfolio_snapshot` 数据工具
+- **🎨 前端设计系统与原子组件库**（#662）
+  - 渐进式双主题架构（HSL 变量化设计令牌）
+  - 重构 20+ 核心组件（Button/Card/Badge/Input/Select 等）
+  - 新增 `clsx` + `tailwind-merge` 类名合并工具
+- **⚡ 分析 API 异步契约与启动优化**（#656）
+  - 规范异步请求返回契约
+  - 修复前端报告类型联合定义
+- **🔔 Discord 环境变量向后兼容**（#659）
+- **🔧 GitHub Actions Node 24 升级**（#665）
+- **📊 新增测试文件**: 多个持仓、API、Agent 相关测试
+- **新增模块**:
+  - `src/repositories/portfolio_repo.py` - 持仓数据仓库
+  - `src/services/portfolio_service.py` - 持仓服务
+  - `src/services/portfolio_import_service.py` - CSV 导入服务
+  - `src/services/portfolio_risk_service.py` - 风险分析服务
+  - `data_provider/fundamental_adapter.py` - 基本面数据适配器
+  - `api/v1/endpoints/portfolio.py` - 持仓 API 端点
+  - `api/v1/schemas/portfolio.py` - 持仓 Schema
+  - `apps/dsa-web/src/pages/PortfolioPage.tsx` - 持仓管理页面
+  - `src/agent/orchestrator.py` - 多智能体协调器
+  - `src/agent/runner.py` - Agent 运行器
+  - `src/agent/agents/` - 专业 Agent 基类和实现
+  - `src/agent/strategies/` - 策略系统
+- **文档新增**: `docs/openclaw-skill-integration.md`
+
+### 2026-03-14 - 同步 upstream v3.6.0
+- **📊 Web UI Design System** — 实现双主题架构和终端风格原子 UI 组件
+- **🗑️ 历史批量删除** — Web UI 支持多选和批量删除分析历史
+- **🔐 Auth settings API** — 运行时启用/禁用 Web 认证
+- **⚙️ LLM channel protocol/test UX** — 统一渠道配置和连接测试
+- **🤖 Agent architecture Phase 0-7** — 多智能体架构完整实现
+  - `AgentOrchestrator` 四模式协调器
+  - `BaseAgent` 专业 Agent 基类
+  - 5 种专业 Agent：Technical/Intel/Decision/Risk/Portfolio
+  - 策略系统和聚合器
+  - Memory 和校准系统
+- **🔍 Bot NL routing** — 自然语言路由和 `/ask` 多股分析
+- **📋 `/history` 和 `/strategies` 命令**
+- **🔬 Deep Research agent** — 三阶段深度研究 Agent
+- **🧠 Agent Memory** — 预测准确度跟踪和置信度校准
+- **📊 Portfolio Agent** — 多股票投资组合分析
+- **🔔 Event-driven alerts** — 价格/成交量/情绪事件监控
+- **新增文档**: openclaw-skill-integration.md
+
 ### 2026-03-13 08:00:00 - 同步 upstream v3.5.0
 - **配置引擎重构 (#602)**: 统一配置注册表、验证和 API 暴露
 - **数据源韧性增强**: 回退链优化，YFinance 获取器大幅增强（Stooq 回退、美股支持）
