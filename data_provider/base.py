@@ -16,10 +16,11 @@
 
 import logging
 import random
+import sqlite3
 import time
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional, List, Tuple, Dict, Any
 
 import pandas as pd
@@ -908,6 +909,38 @@ class DataFetcherManager:
         except Exception as e:
             logger.error(f"[预取] 批量预取异常: {e}")
             return 0
+
+    def prefetch_stock_names(self, stock_codes: List[str], use_bulk: bool = False) -> int:
+        """
+        预取股票名称到内存缓存（Issue #455）
+
+        避免并发分析时多个线程同时获取名称，导致重复请求。
+
+        Args:
+            stock_codes: 股票代码列表
+            use_bulk: 是否使用批量接口（当前未实现，保留参数）
+
+        Returns:
+            成功预取的股票数量
+        """
+        if not stock_codes:
+            return 0
+
+        # 初始化缓存
+        if not hasattr(self, '_stock_name_cache'):
+            self._stock_name_cache = {}
+
+        count = 0
+        for code in stock_codes:
+            normalized_code = normalize_stock_code(code)
+            # 只预取不在缓存中的名称
+            if normalized_code not in self._stock_name_cache:
+                name = self.get_stock_name(normalized_code, allow_realtime=False)
+                if name:
+                    count += 1
+
+        logger.info(f"[预取] 股票名称预取完成，共 {count} 只股票")
+        return count
     
     def get_realtime_quote(self, stock_code: str):
         """
@@ -1185,168 +1218,121 @@ class DataFetcherManager:
     def get_stock_name(self, stock_code: str, allow_realtime: bool = True) -> Optional[str]:
         """
         获取股票中文名称（自动切换数据源）
-        
-        尝试从多个数据源获取股票名称：
-        1. 先从实时行情缓存中获取（如果有）
-        2. 依次尝试各个数据源的 get_stock_name 方法
-        3. 最后尝试让大模型通过搜索获取（需要外部调用）
-        
+
+        获取策略（按优先级）：
+        1. 内存缓存（进程级缓存，最快）
+        2. 数据库缓存（30 天有效期）
+        3. 静态映射表（STOCK_NAME_MAP）
+        4. 实时行情（快速获取）
+        5. 数据源依次尝试（tushare/akshare/efinance 等）
+
         Args:
             stock_code: 股票代码
             allow_realtime: Whether to query realtime quote first. Set False when
                 caller only wants lightweight prefetch without triggering heavy
                 realtime source calls.
-            
+
         Returns:
             股票中文名称，所有数据源都失败则返回 None
         """
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
-        static_name = STOCK_NAME_MAP.get(stock_code)
 
-        # 1. 先检查缓存
+        # 1. 先检查内存缓存
         if hasattr(self, '_stock_name_cache') and stock_code in self._stock_name_cache:
             return self._stock_name_cache[stock_code]
-        
-        # 初始化缓存
+
+        # 初始化内存缓存
         if not hasattr(self, '_stock_name_cache'):
             self._stock_name_cache = {}
-        
-        # 2. 尝试从实时行情中获取（最快，可按需禁用）
+
+        # 2. 检查数据库缓存（30 天有效期）
+        db_name = self._get_stock_name_from_db(stock_code)
+        if db_name:
+            logger.debug(f"[股票名称] 从数据库缓存获取：{stock_code} -> {db_name}")
+            self._stock_name_cache[stock_code] = db_name
+            return db_name
+
+        # 3. 检查静态映射表
+        static_name = STOCK_NAME_MAP.get(stock_code)
+        if is_meaningful_stock_name(static_name, stock_code):
+            self._stock_name_cache[stock_code] = static_name
+            self._save_stock_name_to_db(stock_code, static_name, market='cn', source='static_map')
+            return static_name
+
+        # 4. 尝试从实时行情中获取（最快，可按需禁用）
         if allow_realtime:
             quote = self.get_realtime_quote(stock_code)
             if quote and hasattr(quote, 'name') and is_meaningful_stock_name(getattr(quote, 'name', ''), stock_code):
                 name = quote.name
                 self._stock_name_cache[stock_code] = name
-                logger.info(f"[股票名称] 从实时行情获取: {stock_code} -> {name}")
+                self._save_stock_name_to_db(stock_code, name, market='cn', source='realtime')
+                logger.info(f"[股票名称] 从实时行情获取：{stock_code} -> {name}")
                 return name
 
-        if is_meaningful_stock_name(static_name, stock_code):
-            self._stock_name_cache[stock_code] = static_name
-            return static_name
-
-        # 3. 依次尝试各个数据源
+        # 5. 依次尝试各个数据源
         for fetcher in self._fetchers:
             if hasattr(fetcher, 'get_stock_name'):
                 try:
                     name = fetcher.get_stock_name(stock_code)
                     if is_meaningful_stock_name(name, stock_code):
                         self._stock_name_cache[stock_code] = name
-                        logger.info(f"[股票名称] 从 {fetcher.name} 获取: {stock_code} -> {name}")
+                        # 保存数据库缓存，根据数据源判断市场
+                        market = self._infer_market_from_fetcher(fetcher.name, stock_code)
+                        self._save_stock_name_to_db(stock_code, name, market=market, source=fetcher.name.lower())
+                        logger.info(f"[股票名称] 从 {fetcher.name} 获取：{stock_code} -> {name}")
                         return name
                 except Exception as e:
-                    logger.debug(f"[股票名称] {fetcher.name} 获取失败: {e}")
+                    logger.debug(f"[股票名称] {fetcher.name} 获取失败：{e}")
                     continue
 
-        # 4. 所有数据源都失败
+        # 6. 所有数据源都失败
         logger.warning(f"[股票名称] 所有数据源都无法获取 {stock_code} 的名称")
         return ""
 
-    def get_belong_boards(self, stock_code: str) -> List[Dict[str, Any]]:
-        """
-        Get stock membership boards through capability probing.
 
-        Keep this at manager layer to avoid changing BaseFetcher abstraction.
-        """
-        stock_code = normalize_stock_code(stock_code)
-        if _market_tag(stock_code) != "cn":
-            return []
-        for fetcher in self._fetchers:
-            if not hasattr(fetcher, "get_belong_board"):
-                continue
-            try:
-                raw_data = fetcher.get_belong_board(stock_code)
-                boards = self._normalize_belong_boards(raw_data)
-                if boards:
-                    logger.info(f"[{fetcher.name}] 获取所属板块成功: {stock_code}, count={len(boards)}")
-                    return boards
-            except Exception as e:
-                logger.debug(f"[{fetcher.name}] 获取所属板块失败: {e}")
-                continue
-        return []
+    def _get_stock_name_from_db(self, symbol: str) -> Optional[str]:
+        """从数据库缓存读取股票名称"""
+        try:
+            conn = sqlite3.connect('data/stock_analysis.db')
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT name FROM stock_name_cache
+                WHERE symbol = ? AND expires_at > datetime('now')
+                LIMIT 1
+            """, (symbol,))
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result else None
+        except Exception as e:
+            logger.debug(f"[股票名称] 数据库缓存读取失败：{e}")
+            return None
 
-    def prefetch_stock_names(self, stock_codes: List[str], use_bulk: bool = False) -> None:
-        """
-        Pre-fetch stock names into cache before parallel analysis (Issue #455).
+    def _save_stock_name_to_db(self, symbol: str, name: str, market: str = 'cn', source: str = 'unknown') -> None:
+        """保存股票名称到数据库缓存（30 天有效期）"""
+        try:
+            conn = sqlite3.connect('data/stock_analysis.db')
+            cursor = conn.cursor()
+            expires_at = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute("""
+                INSERT OR REPLACE INTO stock_name_cache (symbol, name, market, source, expires_at, updated_at)
+                VALUES (?, ?, ?, ?, datetime(?), datetime('now'))
+            """, (symbol, name, market, source, expires_at))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"[股票名称] 数据库缓存保存失败：{e}")
 
-        When use_bulk=False, only calls get_stock_name per code (no get_stock_list),
-        avoiding full-market fetch. Sequential execution to avoid rate limits.
+    def _infer_market_from_fetcher(self, fetcher_name: str, stock_code: str) -> str:
+        """根据数据源和股票代码推断市场标识"""
+        fetcher_name_lower = fetcher_name.lower()
+        if 'yfinance' in fetcher_name_lower:
+            if stock_code.startswith('HK'):
+                return 'hk'
+            return 'us'
+        # A 股数据源
+        return 'cn'
 
-        Args:
-            stock_codes: Stock codes to prefetch.
-            use_bulk: If True, may use get_stock_list (full fetch). Default False.
-        """
-        if not stock_codes:
-            return
-        stock_codes = [normalize_stock_code(c) for c in stock_codes]
-        if use_bulk:
-            self.batch_get_stock_names(stock_codes)
-            return
-        for code in stock_codes:
-            # Skip realtime lookup to avoid triggering expensive full-market quote
-            # requests during the prefetch phase.
-            self.get_stock_name(code, allow_realtime=False)
-
-    def batch_get_stock_names(self, stock_codes: List[str]) -> Dict[str, str]:
-        """
-        批量获取股票中文名称
-        
-        先尝试从支持批量查询的数据源获取股票列表，
-        然后再逐个查询缺失的股票名称。
-        
-        Args:
-            stock_codes: 股票代码列表
-            
-        Returns:
-            {股票代码: 股票名称} 字典
-        """
-        result = {}
-        missing_codes = set(stock_codes)
-        
-        # 1. 先检查缓存
-        if not hasattr(self, '_stock_name_cache'):
-            self._stock_name_cache = {}
-        
-        for code in stock_codes:
-            if code in self._stock_name_cache:
-                result[code] = self._stock_name_cache[code]
-                missing_codes.discard(code)
-        
-        if not missing_codes:
-            return result
-        
-        # 2. 尝试批量获取股票列表
-        for fetcher in self._fetchers:
-            if hasattr(fetcher, 'get_stock_list') and missing_codes:
-                try:
-                    stock_list = fetcher.get_stock_list()
-                    if stock_list is not None and not stock_list.empty:
-                        for _, row in stock_list.iterrows():
-                            code = row.get('code')
-                            name = row.get('name')
-                            if code and name:
-                                self._stock_name_cache[code] = name
-                                if code in missing_codes:
-                                    result[code] = name
-                                    missing_codes.discard(code)
-                        
-                        if not missing_codes:
-                            break
-                        
-                        logger.info(f"[股票名称] 从 {fetcher.name} 批量获取完成，剩余 {len(missing_codes)} 个待查")
-                except Exception as e:
-                    logger.debug(f"[股票名称] {fetcher.name} 批量获取失败: {e}")
-                    continue
-        
-        # 3. 逐个获取剩余的
-        for code in list(missing_codes):
-            name = self.get_stock_name(code)
-            if name:
-                result[code] = name
-                missing_codes.discard(code)
-        
-        logger.info(f"[股票名称] 批量获取完成，成功 {len(result)}/{len(stock_codes)}")
-        return result
 
     def get_main_indices(self, region: str = "cn") -> List[Dict[str, Any]]:
         """获取主要指数实时行情（自动切换数据源）"""

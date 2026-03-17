@@ -462,6 +462,8 @@ def start_api_server(host: str, port: int, config: Config) -> None:
             port=port,
             log_level=level_name,
             log_config=None,
+            timeout_keep_alive=300,  # 5分钟连接保持
+            timeout_graceful_shutdown=30,  # 优雅关闭超时
         )
 
     thread = threading.Thread(target=run_server, daemon=True)

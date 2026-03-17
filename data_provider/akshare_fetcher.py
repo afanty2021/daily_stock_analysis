@@ -1326,30 +1326,28 @@ class AkshareFetcher(BaseFetcher):
     
     def _get_hk_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
-        获取港股实时行情数据
-        
-        数据来源：ak.stock_hk_spot_em()
+        获取港股实时行情数据（新浪财经单股接口，快速）
+
+        数据来源：新浪财经港股接口 (http://hq.sinajs.cn/list=hk00883)
         包含：最新价、涨跌幅、成交量、成交额等
-        
+
+        优势：单股查询，响应时间 < 0.1s（相比 ak.stock_hk_spot() 的 13+ 秒）
+
         Args:
             stock_code: 港股代码
-            
+
         Returns:
             UnifiedRealtimeQuote 对象，获取失败返回 None
         """
-        import akshare as ak
+        import requests
         circuit_breaker = get_realtime_circuit_breaker()
         source_key = "akshare_hk"
 
         if not circuit_breaker.is_available(source_key):
             logger.warning(f"[熔断] 数据源 {source_key} 处于熔断状态，跳过")
             return None
-        
+
         try:
-            # 防封禁策略
-            self._set_random_user_agent()
-            self._enforce_rate_limit()
-            
             # 确保代码格式正确（5位数字）
             raw_code = stock_code.strip().lower()
             if raw_code.endswith('.hk'):
@@ -1357,51 +1355,99 @@ class AkshareFetcher(BaseFetcher):
             if raw_code.startswith('hk'):
                 raw_code = raw_code[2:]
             code = raw_code.zfill(5)
-            
-            logger.info(f"[API调用] ak.stock_hk_spot_em() 获取港股实时行情...")
+
+            logger.info(f"[API调用] 新浪港股单股接口获取 {code} 实时行情...")
             import time as _time
             api_start = _time.time()
-            
-            df = ak.stock_hk_spot_em()
-            
+
+            # 新浪财经港股接口 - 单股查询
+            url = f"http://hq.sinajs.cn/list=hk{code}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'http://finance.sina.com.cn',
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+
             api_elapsed = _time.time() - api_start
-            logger.info(f"[API返回] ak.stock_hk_spot_em 成功: 返回 {len(df)} 只港股, 耗时 {api_elapsed:.2f}s")
-            circuit_breaker.record_success(source_key)
-            
-            # 查找指定港股
-            row = df[df['代码'] == code]
-            if row.empty:
-                logger.warning(f"[API返回] 未找到港股 {code} 的实时行情")
+            logger.info(f"[API返回] 新浪港股 {code} 成功: 耗时 {api_elapsed:.2f}s")
+
+            if response.status_code != 200:
+                logger.warning(f"[API返回] 新浪港股 {code} HTTP {response.status_code}")
                 return None
-            
-            row = row.iloc[0]
-            
-            # 使用 realtime_types.py 中的统一转换函数
-            # 港股行情数据构建
+
+            # 解析新浪数据格式
+            # 示例: var hq_str_hk00883="中国海洋石油,29.44,29.40,29.48,28.80,29.20,29.44,...
+            data = response.text
+            if not data or f'hq_str_hk{code}' not in data:
+                logger.warning(f"[API返回] 新浪港股 {code} 数据格式异常")
+                return None
+
+            # 提取数据部分
+            start_idx = data.find('"')
+            end_idx = data.rfind('"')
+            if start_idx == -1 or end_idx == -1:
+                logger.warning(f"[API返回] 新浪港股 {code} 无法解析数据")
+                return None
+
+            fields_str = data[start_idx + 1:end_idx]
+            fields = fields_str.split(',')
+
+            if len(fields) < 13:
+                logger.warning(f"[API返回] 新浪港股 {code} 字段不足: {len(fields)}")
+                return None
+
+            # 新浪港股数据格式解析（19+ 字段）
+            # 示例: var hq_str_hk00883="CNOOC,中国海洋石油,29.640,29.760,30.040,28.600,29.440,-0.320,-1.075,..."
+            # 字段映射:
+            # 0: 英文名, 1: 中文名, 2: 昨收, 3: 今开, 4: 最高, 5: 最低, 6: 最新价,
+            # 7: 涨跌额, 8: 涨跌幅(%), 9: 买一价, 10: 卖一价, 11: 成交量, 12: 成交额,
+            # 21: 52周最高, 22: 52周最低, 23: 日期, 24: 时间
+
+            name_en = fields[0].strip()
+            name_cn = fields[1].strip() if len(fields) > 1 else ''
+            name = name_cn if name_cn else name_en
+            pre_close = safe_float(fields[2])
+            open_price = safe_float(fields[3])
+            high = safe_float(fields[4])
+            low = safe_float(fields[5])
+            price = safe_float(fields[6])
+            change_amount = safe_float(fields[7])
+            change_pct = safe_float(fields[8])
+            volume = safe_int(fields[11]) if len(fields) > 11 else None
+            amount = safe_float(fields[12]) if len(fields) > 12 else None
+            high_52w = safe_float(fields[21]) if len(fields) > 21 else None
+            low_52w = safe_float(fields[22]) if len(fields) > 22 else None
+
+            circuit_breaker.record_success(source_key)
+
             quote = UnifiedRealtimeQuote(
                 code=stock_code,
-                name=str(row.get('名称', '')),
+                name=name,
                 source=RealtimeSource.AKSHARE_EM,
-                price=safe_float(row.get('最新价')),
-                change_pct=safe_float(row.get('涨跌幅')),
-                change_amount=safe_float(row.get('涨跌额')),
-                volume=safe_int(row.get('成交量')),
-                amount=safe_float(row.get('成交额')),
-                volume_ratio=safe_float(row.get('量比')),
-                turnover_rate=safe_float(row.get('换手率')),
-                amplitude=safe_float(row.get('振幅')),
-                pe_ratio=safe_float(row.get('市盈率')),
-                pb_ratio=safe_float(row.get('市净率')),
-                total_mv=safe_float(row.get('总市值')),
-                circ_mv=safe_float(row.get('流通市值')),
-                high_52w=safe_float(row.get('52周最高')),
-                low_52w=safe_float(row.get('52周最低')),
+                price=price,
+                change_pct=change_pct,
+                change_amount=change_amount,
+                volume=volume,
+                amount=amount,
+                high=high,
+                low=low,
+                open_price=open_price,
+                pre_close=pre_close,
+                # 新浪单股接口不提供以下字段
+                volume_ratio=None,
+                turnover_rate=None,
+                amplitude=None,
+                pe_ratio=None,
+                pb_ratio=None,
+                total_mv=None,
+                circ_mv=None,
+                high_52w=high_52w,
+                low_52w=low_52w,
             )
-            
-            logger.info(f"[港股实时行情] {stock_code} {quote.name}: 价格={quote.price}, 涨跌={quote.change_pct}%, "
-                       f"换手率={quote.turnover_rate}%")
+
+            logger.info(f"[港股实时行情] {stock_code} {name}: 价格={price}, 涨跌={change_pct:.2f}%")
             return quote
-            
+
         except Exception as e:
             logger.error(f"[API错误] 获取港股 {stock_code} 实时行情失败: {e}")
             circuit_breaker.record_failure(source_key, str(e))

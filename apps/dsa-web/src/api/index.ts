@@ -4,7 +4,7 @@ import { attachParsedApiError } from './error';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000,
+  timeout: 120000, // 120秒超时，支持实时价格获取
   withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
