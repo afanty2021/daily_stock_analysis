@@ -147,15 +147,20 @@ class PortfolioCorporateActionListResponse(BaseModel):
 
 class PortfolioPositionItem(BaseModel):
     symbol: str
+    name: Optional[str] = None
+    is_etf: bool = False
     market: str
     currency: str
     quantity: float
     avg_cost: float
     total_cost: float
-    last_price: float
-    market_value_base: float
-    unrealized_pnl_base: float
-    valuation_currency: str
+    last_price: float = Field(alias="lastPrice")
+    market_value_base: float = Field(alias="marketValueBase")
+    unrealized_pnl_base: float = Field(alias="unrealizedPnlBase")
+    valuation_currency: str = Field(alias="valuationCurrency")
+
+    class Config:
+        populate_by_name = True  # 允许使用别名字段名
 
 
 class PortfolioAccountSnapshot(BaseModel):

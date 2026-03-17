@@ -198,19 +198,21 @@ class PortfolioImportService:
                 if not dedup_hash:
                     dedup_hash = self._build_dedup_hash(record)
 
-                if trade_uid and self.repo.has_trade_uid(account_id, trade_uid):
+                dedup_hash_to_use: Optional[str] = dedup_hash or None
+                # 优先检查 dedup_hash（包含行号），允许相同成交编号的不同记录
+                if dedup_hash_to_use and self.repo.has_trade_dedup_hash(account_id, dedup_hash_to_use):
                     duplicate_count += 1
                     continue
-                dedup_hash_to_use: Optional[str] = dedup_hash or None
-                if dedup_hash_to_use and self.repo.has_trade_dedup_hash(account_id, dedup_hash_to_use):
+                # trade_uid 检查作为补充（防止不同数据源的重复）
+                if trade_uid and self.repo.has_trade_uid(account_id, trade_uid):
                     duplicate_count += 1
                     continue
 
                 if dry_run:
-                    if trade_uid and trade_uid in seen_trade_uids:
+                    if dedup_hash_to_use and dedup_hash_to_use in seen_dedup_hashes:
                         duplicate_count += 1
                         continue
-                    if dedup_hash_to_use and dedup_hash_to_use in seen_dedup_hashes:
+                    if trade_uid and trade_uid in seen_trade_uids:
                         duplicate_count += 1
                         continue
                     inserted_count += 1
@@ -226,21 +228,62 @@ class PortfolioImportService:
                 else:
                     trade_date_obj = date.fromisoformat(str(trade_date_value))
 
-                self.portfolio_service.record_trade(
-                    account_id=account_id,
-                    symbol=str(record["symbol"]),
-                    trade_date=trade_date_obj,
-                    side=str(record["side"]),
-                    quantity=float(record["quantity"]),
-                    price=float(record["price"]),
-                    fee=float(record.get("fee", 0.0) or 0.0),
-                    tax=float(record.get("tax", 0.0) or 0.0),
-                    market=record.get("market"),
-                    currency=record.get("currency"),
-                    trade_uid=trade_uid,
-                    dedup_hash=dedup_hash_to_use,
-                    note=(record.get("note") or "").strip() or f"csv_import:{broker_norm}",
-                )
+                # 处理投入资金（现金流水）- 优先检查
+                if record.get("account_type") == "投入资金":
+                    # 投入资金作为现金流入
+                    cash_amount = float(record.get("cash_flow", 0) or 0)
+                    self.portfolio_service.record_cash_ledger(
+                        account_id=account_id,
+                        event_date=trade_date_obj,
+                        direction="in",
+                        amount=cash_amount,
+                        currency=record.get("currency"),
+                        note="投入资金",
+                    )
+                # 处理现金分红记录（空方向）
+                elif str(record.get("side")) == "cash_dividend":
+                    # 空方向记录作为现金流水（分红）
+                    # 分红金额 = 分红股票数 × 每股分红额
+                    dividend_amount = float(record["quantity"]) * float(record["price"])
+                    self.portfolio_service.record_cash_ledger(
+                        account_id=account_id,
+                        event_date=trade_date_obj,
+                        direction="in",  # 分红是现金流入
+                        amount=dividend_amount,
+                        currency=record.get("currency"),
+                        note=f"分红：{record['symbol']} ({record['quantity']}股 × {record['price']}元)",
+                    )
+                # 处理送股记录（企业行为）
+                elif str(record.get("side")) == "bonus":
+                    # 送股作为企业行为，增加持仓数量
+                    bonus_qty = float(record["quantity"])
+                    self.portfolio_service.record_corporate_action(
+                        account_id=account_id,
+                        symbol=str(record["symbol"]),
+                        effective_date=trade_date_obj,
+                        action_type="bonus_share",
+                        market=record.get("market"),
+                        currency=record.get("currency"),
+                        bonus_quantity=bonus_qty,
+                        note=(record.get("note") or "").strip() or f"送股:{broker_norm}",
+                    )
+                else:
+                    # 正常交易记录
+                    self.portfolio_service.record_trade(
+                        account_id=account_id,
+                        symbol=str(record["symbol"]),
+                        trade_date=trade_date_obj,
+                        side=str(record["side"]),
+                        quantity=float(record["quantity"]),
+                        price=float(record["price"]),
+                        fee=float(record.get("fee", 0.0) or 0.0),
+                        tax=float(record.get("tax", 0.0) or 0.0),
+                        market=record.get("market"),
+                        currency=record.get("currency"),
+                        trade_uid=trade_uid,
+                        dedup_hash=dedup_hash_to_use,
+                        note=(record.get("note") or "").strip() or f"csv_import:{broker_norm}",
+                    )
                 inserted_count += 1
             except PortfolioConflictError:
                 duplicate_count += 1
@@ -300,6 +343,9 @@ class PortfolioImportService:
         if trade_date_obj is None:
             return None
 
+        # 检查是否有"账目类型"列（用于处理投入资金等特殊记录）
+        account_type = self._pick(row, "账目类型", "account_type")
+
         symbol_raw = self._pick(
             row,
             *(broker_hints.get("symbol") or ()),
@@ -308,7 +354,9 @@ class PortfolioImportService:
             "代码",
         )
         symbol = canonical_stock_code(str(symbol_raw or "").strip())
-        if not symbol:
+
+        # 如果是投入资金，允许 symbol 为空
+        if not symbol and account_type != "投入资金":
             return None
 
         side_raw = self._pick(
@@ -321,17 +369,29 @@ class PortfolioImportService:
             "操作",
         )
         side = self._normalize_side(side_raw)
-        if side is None:
+
+        # 如果是投入资金且无方向，保留记录
+        if side is None and account_type != "投入资金":
             return None
 
-        quantity = self._parse_float(
-            self._pick(row, *(broker_hints.get("quantity") or ()), "成交数量", "数量", "成交股数")
-        )
-        price = self._parse_float(
-            self._pick(row, *(broker_hints.get("price") or ()), "成交均价", "成交价格", "价格", "成交价", "均价")
-        )
-        if quantity is None or quantity <= 0 or price is None or price <= 0:
-            return None
+        # 送股记录：允许 price 为空
+        if side == "bonus":
+            quantity = self._parse_float(
+                self._pick(row, *(broker_hints.get("quantity") or ()), "成交数量", "数量", "成交股数")
+            )
+            price = None  # 送股不需要价格
+        else:
+            quantity = self._parse_float(
+                self._pick(row, *(broker_hints.get("quantity") or ()), "成交数量", "数量", "成交股数")
+            )
+            price = self._parse_float(
+                self._pick(row, *(broker_hints.get("price") or ()), "成交均价", "成交价格", "价格", "成交价", "均价")
+            )
+
+        # 非送股、非投入资金的记录需要数量和价格
+        if side not in ("bonus", "cash_dividend") and account_type != "投入资金":
+            if quantity is None or quantity <= 0 or price is None or price <= 0:
+                return None
 
         fee = 0.0
         for col in ("手续费", "佣金", "交易费", "规费", "过户费"):
@@ -356,17 +416,28 @@ class PortfolioImportService:
         )
         currency = self._pick(row, "币种", "货币")
 
-        return {
+        # 获取现金流量（用于投入资金）
+        cash_flow = self._pick(row, "现金流量", "cash_flow")
+
+        result: Dict[str, Any] = {
             "trade_date": trade_date_obj,
             "symbol": symbol,
-            "side": side,
-            "quantity": float(quantity),
-            "price": float(price),
+            "side": side if side else "",
+            "quantity": float(quantity) if quantity is not None else 0.0,
+            "price": float(price) if price is not None else 0.0,
             "fee": float(fee),
             "tax": float(tax),
             "trade_uid": (str(trade_uid).strip() if trade_uid is not None else None) or None,
             "currency": (str(currency).strip().upper() if currency is not None else None) or None,
         }
+
+        # 添加账目类型和现金流量
+        if account_type:
+            result["account_type"] = str(account_type)
+        if cash_flow:
+            result["cash_flow"] = str(cash_flow)
+
+        return result
 
     @staticmethod
     def _pick(row: Any, *candidates: str) -> Any:
@@ -393,9 +464,13 @@ class PortfolioImportService:
     def _parse_date(value: Any) -> Optional[date]:
         if value is None:
             return None
+        import re
         text = str(value).strip()
         if not text or text.lower() == "nan":
             return None
+        # 修复日期格式：将 "- 9" 或 "-  9" 格式修复为 "-09"
+        # 例如: "2025-10- 9" -> "2025-10-09"
+        text = re.sub(r"-(\s+)(\d)$", r"-0\2", text)
         parsed = pd.to_datetime(text, errors="coerce")
         if pd.isna(parsed):
             return None
@@ -405,7 +480,8 @@ class PortfolioImportService:
     def _normalize_side(value: Any) -> Optional[str]:
         text = str(value or "").strip().lower()
         if not text:
-            return None
+            # 空买卖方向：返回特殊标记，表示这是现金分红记录
+            return "cash_dividend"
         compact = text.replace(" ", "")
         buy_exact = {"buy", "b", "买", "买入", "证券买入", "普通买入"}
         sell_exact = {"sell", "s", "卖", "卖出", "证券卖出", "普通卖出"}
@@ -417,6 +493,9 @@ class PortfolioImportService:
             return "buy"
         if "卖出" in compact or compact.startswith("卖"):
             return "sell"
+        # 送股：企业行为
+        if compact == "bonus" or "送股" in compact:
+            return "bonus"
         return None
 
     @staticmethod

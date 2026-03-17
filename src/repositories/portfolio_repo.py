@@ -24,6 +24,7 @@ from src.storage import (
     PortfolioPositionLot,
     PortfolioTrade,
     StockDaily,
+    StockNameCache,
 )
 
 logger = logging.getLogger(__name__)
@@ -205,6 +206,7 @@ class PortfolioRepository:
         action_type: str,
         cash_dividend_per_share: Optional[float] = None,
         split_ratio: Optional[float] = None,
+        bonus_quantity: Optional[float] = None,
         note: Optional[str] = None,
     ) -> PortfolioCorporateAction:
         with self.db.get_session() as session:
@@ -217,6 +219,7 @@ class PortfolioRepository:
                 action_type=action_type,
                 cash_dividend_per_share=cash_dividend_per_share,
                 split_ratio=split_ratio,
+                bonus_quantity=bonus_quantity,
                 note=note,
             )
             session.add(row)
@@ -800,3 +803,39 @@ class PortfolioRepository:
                 existing.updated_at = datetime.now()
 
             session.commit()
+
+    # ------------------------------------------------------------------
+    # Stock Name Cache (批量读取优化)
+    # ------------------------------------------------------------------
+    def get_stock_names_batch(self, symbols: List[str]) -> Dict[str, str]:
+        """批量获取股票名称，避免逐个调用 API。
+
+        Args:
+            symbols: 股票代码列表
+
+        Returns:
+            {symbol: name} 映射字典
+        """
+        if not symbols:
+            return {}
+
+        with self.db.get_session() as session:
+            from datetime import datetime
+
+            now = datetime.now()
+            result: Dict[str, str] = {}
+
+            # 批量查询所有未过期的缓存记录
+            rows = session.execute(
+                select(StockNameCache.symbol, StockNameCache.name).where(
+                    and_(
+                        StockNameCache.symbol.in_(symbols),
+                        StockNameCache.expires_at > now,
+                    )
+                )
+            ).all()
+
+            for symbol, name in rows:
+                result[symbol] = name
+
+            return result

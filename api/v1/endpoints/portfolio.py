@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from datetime import date
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 
 from api.v1.schemas.common import ErrorResponse
 from api.v1.schemas.portfolio import (
@@ -33,10 +35,72 @@ from api.v1.schemas.portfolio import (
 from src.services.portfolio_import_service import PortfolioImportService
 from src.services.portfolio_risk_service import PortfolioRiskService
 from src.services.portfolio_service import PortfolioConflictError, PortfolioService
+from src.services.realtime_price_service import RealtimePriceService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# WebSocket connection manager
+class ConnectionManager:
+    """Manage active WebSocket connections for real-time price updates."""
+
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        """Accept and register a new WebSocket connection."""
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        """Remove a WebSocket connection."""
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+        logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
+
+    async def send_personal_message(self, message: dict, websocket: WebSocket):
+        """Send a message to a specific WebSocket connection."""
+        try:
+            await websocket.send_json(message)
+        except Exception as e:
+            logger.error(f"Error sending message to WebSocket: {e}")
+
+    async def broadcast(self, message: dict):
+        """Broadcast a message to all active connections."""
+        disconnected = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception as e:
+                logger.error(f"Error broadcasting to connection: {e}")
+                disconnected.append(connection)
+
+        # Remove disconnected clients
+        for conn in disconnected:
+            self.disconnect(conn)
+
+
+# Global connection manager instance
+connection_manager = ConnectionManager()
+
+
+async def _safe_send_json(websocket: WebSocket, message: dict) -> bool:
+    """
+    Safely send a JSON message to a WebSocket, checking connection state first.
+
+    Returns True if the message was sent successfully, False otherwise.
+    """
+    if websocket.client_state.name != "connected":
+        return False
+
+    try:
+        await websocket.send_json(message)
+        return True
+    except Exception as e:
+        logger.debug(f"Failed to send WebSocket message: {e}")
+        return False
 
 
 def _bad_request(exc: Exception) -> HTTPException:
@@ -350,6 +414,8 @@ def get_snapshot(
     account_id: Optional[int] = Query(None, description="Optional account id, default returns all accounts"),
     as_of: Optional[date] = Query(None, description="Snapshot date, default today"),
     cost_method: str = Query("fifo", description="Cost method: fifo or avg"),
+    use_realtime: bool = Query(False, description="Use realtime quotes for prices (slower)"),
+    save_to_db: bool = Query(False, description="Save snapshot to database (default false for web view)"),
 ) -> PortfolioSnapshotResponse:
     service = PortfolioService()
     try:
@@ -357,6 +423,8 @@ def get_snapshot(
             account_id=account_id,
             as_of=as_of,
             cost_method=cost_method,
+            use_realtime=use_realtime,
+            save_to_db=save_to_db,
         )
         return PortfolioSnapshotResponse(**data)
     except ValueError as exc:
@@ -475,3 +543,205 @@ def get_risk_report(
         raise _bad_request(exc)
     except Exception as exc:
         raise _internal_error("Get risk report failed", exc)
+
+
+@router.websocket("/ws/realtime")
+async def websocket_realtime_prices(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time portfolio price updates.
+
+    Protocol:
+    1. Client connects
+    2. Client sends JSON message with symbols to track:
+       {"action": "subscribe", "symbols": ["600519", "000001", "HK00700"]}
+    3. Server streams price updates every 5 seconds:
+       {"type": "price_update", "symbol": "600519", "success": true, "data": {...}}
+
+    Example:
+        const ws = new WebSocket('ws://localhost:8000/api/v1/portfolio/ws/realtime');
+        ws.onopen = () => {
+            ws.send(JSON.stringify({action: 'subscribe', symbols: ['600519', '000001']}));
+        };
+        ws.onmessage = (event) => {
+            const update = JSON.parse(event.data);
+            console.log('Price update:', update);
+        };
+    """
+    await connection_manager.connect(websocket)
+    price_service = RealtimePriceService()
+    subscribed_symbols: List[str] = []
+    streaming_task = None
+
+    try:
+        # Send welcome message
+        await _safe_send_json(websocket, {
+            "type": "connected",
+            "message": "Connected to real-time price feed",
+            "timestamp": asyncio.get_event_loop().time(),
+        })
+
+        # Handle client messages
+        while True:
+            try:
+                # Receive message from client
+                data = await websocket.receive_text()
+                message = json.loads(data)
+
+                action = message.get("action")
+
+                if action == "subscribe":
+                    # Subscribe to symbols
+                    new_symbols = message.get("symbols", [])
+                    if not isinstance(new_symbols, list):
+                        await _safe_send_json(websocket, {
+                            "type": "error",
+                            "message": "symbols must be a list",
+                        })
+                        continue
+
+                    # Update subscribed symbols
+                    subscribed_symbols = new_symbols
+
+                    # Send initial prices immediately
+                    if subscribed_symbols:
+                        price_map = await price_service.fetch_realtime_prices(subscribed_symbols)
+                        for symbol, price_data in price_map.items():
+                            if not await _safe_send_json(
+                                websocket,
+                                price_service.format_price_update(symbol, price_data)
+                            ):
+                                break
+
+                    # Start streaming if not already running
+                    if streaming_task is None or streaming_task.done():
+                        streaming_task = asyncio.create_task(
+                            _stream_prices(websocket, price_service, subscribed_symbols)
+                        )
+
+                    await _safe_send_json(websocket, {
+                        "type": "subscribed",
+                        "symbols": subscribed_symbols,
+                        "count": len(subscribed_symbols),
+                    })
+
+                elif action == "unsubscribe":
+                    # Unsubscribe from specific symbols or all
+                    symbols_to_remove = message.get("symbols", [])
+
+                    if not symbols_to_remove:
+                        # Unsubscribe from all
+                        subscribed_symbols = []
+                        if streaming_task and not streaming_task.done():
+                            streaming_task.cancel()
+                            try:
+                                await streaming_task
+                            except asyncio.CancelledError:
+                                pass
+                    else:
+                        # Unsubscribe from specific symbols
+                        subscribed_symbols = [
+                            s for s in subscribed_symbols if s not in symbols_to_remove
+                        ]
+
+                    await _safe_send_json(websocket, {
+                        "type": "unsubscribed",
+                        "symbols": subscribed_symbols,
+                        "count": len(subscribed_symbols),
+                    })
+
+                elif action == "ping":
+                    # Respond to ping with pong
+                    await _safe_send_json(websocket, {
+                        "type": "pong",
+                        "timestamp": asyncio.get_event_loop().time(),
+                    })
+
+                else:
+                    await _safe_send_json(websocket, {
+                        "type": "error",
+                        "message": f"Unknown action: {action}",
+                    })
+
+            except json.JSONDecodeError:
+                await _safe_send_json(websocket, {
+                    "type": "error",
+                    "message": "Invalid JSON message",
+                })
+            except Exception as e:
+                logger.error(f"Error handling WebSocket message: {e}")
+                await _safe_send_json(websocket, {
+                    "type": "error",
+                    "message": str(e),
+                })
+
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+    finally:
+        # Clean up
+        if streaming_task and not streaming_task.done():
+            streaming_task.cancel()
+            try:
+                await streaming_task
+            except asyncio.CancelledError:
+                pass
+
+        connection_manager.disconnect(websocket)
+
+
+async def _stream_prices(
+    websocket: WebSocket,
+    price_service: RealtimePriceService,
+    symbols: List[str],
+    interval_seconds: int = 5,
+):
+    """
+    Internal function to stream price updates at regular intervals.
+
+    This function runs as a background task and sends price updates
+    to the WebSocket client every `interval_seconds` seconds.
+    """
+    try:
+        while True:
+            # Check if connection is still open before each iteration
+            if websocket.client_state.name != "connected":
+                logger.info("WebSocket connection closed, stopping stream")
+                break
+
+            if not symbols:
+                await asyncio.sleep(interval_seconds)
+                continue
+
+            try:
+                # Fetch prices for all subscribed symbols
+                price_map = await price_service.fetch_realtime_prices(symbols)
+
+                # Send updates for each symbol
+                for symbol, price_data in price_map.items():
+                    if not await _safe_send_json(
+                        websocket,
+                        price_service.format_price_update(symbol, price_data)
+                    ):
+                        # Connection closed, stop streaming
+                        return
+
+            except Exception as e:
+                logger.error(f"Error streaming prices: {e}")
+                # Try to send error message
+                sent = await _safe_send_json(websocket, {
+                    "type": "error",
+                    "message": f"Error fetching prices: {str(e)}",
+                })
+                if not sent:
+                    # Connection closed, stop streaming
+                    return
+                # Break the loop on error to avoid continuous errors
+                break
+
+            # Wait before next update
+            await asyncio.sleep(interval_seconds)
+
+    except asyncio.CancelledError:
+        logger.info("Price streaming cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in price streaming: {e}")

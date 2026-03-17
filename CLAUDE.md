@@ -358,6 +358,47 @@ pip install flake8 pytest
 
 ## AI 使用指引
 
+### 🚀 开发新功能规则（CRITICAL）
+
+**开发新功能必须使用 Superpowers 的 subagent-driven-development 技能**
+
+本项目已安装 Superpowers 插件，所有新功能开发必须遵循以下流程：
+
+#### 1. 触发 Superpowers 技能
+
+直接描述需求，Superpowers 会自动引导整个开发流程：
+
+```
+我想开发一个新功能：[功能描述]
+```
+
+Superpowers 会自动触发以下技能：
+- **brainstorming** - 设计阶段
+- **writing-plans** - 计划阶段
+- **subagent-driven-development** - 开发阶段（核心）
+- **test-driven-development** - 测试阶段
+- **requesting-code-review** - 代码审查阶段
+
+#### 2. Subagent-Driven-Development 流程
+
+- 每个任务由独立的子代理完成
+- 两阶段审查：规格符合性 → 代码质量
+- 并行处理多个任务
+- 自动验证和代码审查
+
+#### 3. 禁止直接编码
+
+❌ **禁止直接编写代码** - 必须通过 Superpowers 工作流
+❌ **禁止直接使用 Task 工具** - Superpowers 会自动调用子代理
+✅ **必须通过 Superpowers 技能** - 确保代码质量和可维护性
+
+#### 4. 例外情况
+
+只有以下情况可以不使用 Superpowers：
+- **紧急 Bug 修复**：单个方法的简单修复
+- **文档更新**：README、CHANGELOG 等非代码修改
+- **配置调整**：环境变量、配置文件修改
+
 ### 项目特点
 1. **多数据源**：支持 AkShare、Tushare、腾讯财经、Yahoo Finance 等
 2. **多通知渠道**：企业微信、飞书、Telegram、Discord、邮件等

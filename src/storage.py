@@ -470,9 +470,10 @@ class PortfolioCorporateAction(Base):
     market = Column(String(8), nullable=False, default='cn')
     currency = Column(String(8), nullable=False, default='CNY')
     effective_date = Column(Date, nullable=False, index=True)
-    action_type = Column(String(24), nullable=False)  # cash_dividend/split_adjustment
+    action_type = Column(String(24), nullable=False)  # cash_dividend/split_adjustment/bonus_share
     cash_dividend_per_share = Column(Float)
     split_ratio = Column(Float)
+    bonus_quantity = Column(Float)  # 送股数量（绝对值，非比例）
     note = Column(String(255))
     created_at = Column(DateTime, default=datetime.now, index=True)
 
@@ -618,6 +619,51 @@ class LLMUsage(Base):
     completion_tokens = Column(Integer, nullable=False, default=0)
     total_tokens = Column(Integer, nullable=False, default=0)
     called_at = Column(DateTime, default=datetime.now, index=True)
+
+
+class StockNameCache(Base):
+    """
+    股票名称缓存表（P0 读/写）。
+
+    缓存股票中文名称，避免每次从数据源重复获取。
+    股票名称是静态数据，很少变更，缓存有效期 30 天。
+    """
+    __tablename__ = 'stock_name_cache'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # 股票代码（标准化后的代码，如 600519, HK00700, AAPL）
+    symbol = Column(String(20), nullable=False, index=True)
+
+    # 股票中文名称
+    name = Column(String(100), nullable=False)
+
+    # 市场标识（cn/hk/us），用于判断名称来源可靠性
+    market = Column(String(10))
+
+    # 数据来源（tushare/akshare/efinance/pytdx/baostock/yfinance/static_map）
+    source = Column(String(32))
+
+    # 缓存过期时间（30 天）
+    expires_at = Column(DateTime, nullable=False)
+
+    # 更新时间
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    # 唯一约束：同一股票代码只能有一条缓存记录
+    __table_args__ = (
+        UniqueConstraint('symbol', name='uix_stock_name_symbol'),
+    )
+
+    def __repr__(self) -> str:
+        return f"<StockNameCache(symbol={self.symbol}, name={self.name})>"
+
+    @classmethod
+    def is_expired(cls, record: 'StockNameCache') -> bool:
+        """检查缓存记录是否过期"""
+        if record.expires_at is None:
+            return True
+        return datetime.now() > record.expires_at
 
 
 class DatabaseManager:
