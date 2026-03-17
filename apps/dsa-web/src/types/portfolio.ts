@@ -1,7 +1,7 @@
 export type PortfolioCostMethod = 'fifo' | 'avg';
 export type PortfolioSide = 'buy' | 'sell';
 export type PortfolioCashDirection = 'in' | 'out';
-export type PortfolioCorporateActionType = 'cash_dividend' | 'split_adjustment';
+export type PortfolioCorporateActionType = 'cash_dividend' | 'split_adjustment' | 'bonus_share';
 
 export interface PortfolioAccountItem {
   id: number;
@@ -29,6 +29,8 @@ export interface PortfolioAccountCreateRequest {
 
 export interface PortfolioPositionItem {
   symbol: string;
+  name?: string | null;
+  isEtf?: boolean;
   market: string;
   currency: string;
   quantity: number;
@@ -171,6 +173,7 @@ export interface PortfolioCorporateActionCreateRequest {
   currency?: string;
   cashDividendPerShare?: number;
   splitRatio?: number;
+  bonusQuantity?: number;
   note?: string;
 }
 
@@ -282,3 +285,63 @@ export interface PortfolioImportBrokerItem {
 export interface PortfolioImportBrokerListResponse {
   brokers: PortfolioImportBrokerItem[];
 }
+
+// WebSocket real-time price update types
+export interface PortfolioPriceUpdateData {
+  symbol: string;
+  name?: string | null;
+  price: number;
+  change: number;
+  change_pct: number;
+  open: number;
+  high: number;
+  low: number;
+  prev_close: number;
+  volume: number;
+  amount: number;
+  timestamp: string;
+}
+
+export interface PortfolioPriceUpdate {
+  type: 'price_update';
+  symbol: string;
+  success: boolean;
+  data?: PortfolioPriceUpdateData;
+  error?: string;
+}
+
+export interface PortfolioWebSocketConnected {
+  type: 'connected';
+  message: string;
+  timestamp: number;
+}
+
+export interface PortfolioWebSocketSubscribed {
+  type: 'subscribed';
+  symbols: string[];
+  count: number;
+}
+
+export interface PortfolioWebSocketUnsubscribed {
+  type: 'unsubscribed';
+  symbols: string[];
+  count: number;
+}
+
+export interface PortfolioWebSocketPong {
+  type: 'pong';
+  timestamp: number;
+}
+
+export interface PortfolioWebSocketError {
+  type: 'error';
+  message: string;
+}
+
+export type PortfolioWebSocketMessage =
+  | PortfolioPriceUpdate
+  | PortfolioWebSocketConnected
+  | PortfolioWebSocketSubscribed
+  | PortfolioWebSocketUnsubscribed
+  | PortfolioWebSocketPong
+  | PortfolioWebSocketError;

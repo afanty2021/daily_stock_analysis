@@ -1,7 +1,7 @@
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Pie, PieChart, ResponsiveContainer, Tooltip, Legend, Cell } from 'recharts';
-import { portfolioApi } from '../api/portfolio';
+import { portfolioApi, PortfolioWebSocketClient } from '../api/portfolio';
 import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge } from '../components/common';
@@ -17,6 +17,7 @@ import type {
   PortfolioImportCommitResponse,
   PortfolioImportParseResponse,
   PortfolioPositionItem,
+  PortfolioPriceUpdateData,
   PortfolioRiskResponse,
   PortfolioSide,
   PortfolioSnapshotResponse,
@@ -43,17 +44,19 @@ function getTodayIso(): string {
   return toDateInputValue(new Date());
 }
 
-function formatMoney(value: number | undefined | null, currency = 'CNY'): string {
+/** 格式化金额（不带货币符号） */
+function formatMoneyNoCurrency(value: number | undefined | null): string {
   if (value == null || Number.isNaN(value)) return '--';
-  return `${currency} ${Number(value).toLocaleString('zh-CN', {
+  return Number(value).toLocaleString('zh-CN', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  })}`;
+  });
 }
 
-function formatPct(value: number | undefined | null): string {
+/** 格式化百分比 */
+function formatPct(value: number | undefined | null, decimals = 2): string {
   if (value == null || Number.isNaN(value)) return '--';
-  return `${value.toFixed(2)}%`;
+  return `${value.toFixed(decimals)}%`;
 }
 
 function formatSideLabel(value: PortfolioSide): string {
@@ -65,7 +68,10 @@ function formatCashDirectionLabel(value: PortfolioCashDirection): string {
 }
 
 function formatCorporateActionLabel(value: PortfolioCorporateActionType): string {
-  return value === 'cash_dividend' ? '现金分红' : '拆并股调整';
+  if (value === 'cash_dividend') return '现金分红';
+  if (value === 'split_adjustment') return '拆并股调整';
+  if (value === 'bonus_share') return '送股';
+  return '未知';
 }
 
 function formatBrokerLabel(value: string, displayName?: string): string {
@@ -74,6 +80,21 @@ function formatBrokerLabel(value: string, displayName?: string): string {
   if (value === 'citic') return 'citic（中信）';
   if (value === 'cmb') return 'cmb（招商）';
   return value;
+}
+
+function getPositionWithRealtimePrice(
+  position: PortfolioPositionItem,
+  realtimePrices: Map<string, PortfolioPriceUpdateData>
+): PortfolioPositionItem & { isRealtime?: boolean } {
+  const realtimeData = realtimePrices.get(position.symbol);
+  if (realtimeData) {
+    return {
+      ...position,
+      lastPrice: realtimeData.price,
+      isRealtime: true,
+    };
+  }
+  return position;
 }
 
 const PortfolioPage: React.FC = () => {
@@ -96,6 +117,11 @@ const PortfolioPage: React.FC = () => {
   const [error, setError] = useState<ParsedApiError | null>(null);
   const [riskWarning, setRiskWarning] = useState<string | null>(null);
   const [writeWarning, setWriteWarning] = useState<string | null>(null);
+
+  // WebSocket client for real-time price updates
+  const wsClientRef = useRef<PortfolioWebSocketClient | null>(null);
+  const [realtimePrices, setRealtimePrices] = useState<Map<string, PortfolioPriceUpdateData>>(new Map());
+  const [wsConnected, setWsConnected] = useState(false);
 
   const [brokers, setBrokers] = useState<PortfolioImportBrokerItem[]>([]);
   const [selectedBroker, setSelectedBroker] = useState('huatai');
@@ -145,6 +171,7 @@ const PortfolioPage: React.FC = () => {
     actionType: 'cash_dividend' as PortfolioCorporateActionType,
     cashDividendPerShare: '',
     splitRatio: '',
+    bonusQuantity: '',
     note: '',
   });
 
@@ -197,13 +224,15 @@ const PortfolioPage: React.FC = () => {
     }
   }, [selectedBroker]);
 
-  const loadSnapshotAndRisk = useCallback(async () => {
+  const loadSnapshotAndRisk = useCallback(async (useRealtime = false) => {
     setIsLoading(true);
     setRiskWarning(null);
     try {
       const snapshotData = await portfolioApi.getSnapshot({
         accountId: queryAccountId,
         costMethod,
+        useRealtime,
+        saveToDb: useRealtime, // 刷新时保存实时价格到数据库
       });
       setSnapshot(snapshotData);
       setError(null);
@@ -323,6 +352,55 @@ const PortfolioPage: React.FC = () => {
     return rows;
   }, [snapshot]);
 
+  // Initialize WebSocket client
+  useEffect(() => {
+    if (!wsClientRef.current) {
+      const client = new PortfolioWebSocketClient();
+      wsClientRef.current = client;
+
+      // Set up message handler
+      const handleMessage = (message: any) => {
+        if (message.type === 'connected') {
+          setWsConnected(true);
+        } else if (message.type === 'price_update' && message.success && message.data) {
+          // Update real-time price for the symbol
+          setRealtimePrices((prev) => {
+            const next = new Map(prev);
+            next.set(message.symbol, message.data);
+            return next;
+          });
+        }
+      };
+
+      client.connect();
+      client.subscribe([], handleMessage); // Will subscribe when symbols are available
+
+      return () => {
+        client.disconnect();
+        wsClientRef.current = null;
+      };
+    }
+  }, []);
+
+  // Update WebSocket subscription when snapshot changes
+  useEffect(() => {
+    if (!wsClientRef.current) return;
+
+    const symbols = positionRows.map((p) => p.symbol);
+    const uniqueSymbols = Array.from(new Set(symbols));
+
+    if (uniqueSymbols.length > 0) {
+      wsClientRef.current.updateSymbols(uniqueSymbols);
+    }
+  }, [snapshot, selectedAccount, costMethod]);
+
+  // Update connection status
+  useEffect(() => {
+    if (wsClientRef.current) {
+      setWsConnected(wsClientRef.current.isConnected());
+    }
+  }, [snapshot]);
+
   const sectorPieData = useMemo(() => {
     const sectors = risk?.sectorConcentration?.topSectors || [];
     return sectors
@@ -415,10 +493,11 @@ const PortfolioPage: React.FC = () => {
         actionType: corpForm.actionType,
         cashDividendPerShare: corpForm.cashDividendPerShare ? Number(corpForm.cashDividendPerShare) : undefined,
         splitRatio: corpForm.splitRatio ? Number(corpForm.splitRatio) : undefined,
+        bonusQuantity: corpForm.bonusQuantity ? Number(corpForm.bonusQuantity) : undefined,
         note: corpForm.note || undefined,
       });
       await Promise.all([loadSnapshotAndRisk(), loadEvents()]);
-      setCorpForm((prev) => ({ ...prev, symbol: '', note: '' }));
+      setCorpForm((prev) => ({ ...prev, symbol: '', note: '', bonusQuantity: '', cashDividendPerShare: '', splitRatio: '' }));
     } catch (err) {
       setError(getParsedApiError(err));
     }
@@ -498,7 +577,8 @@ const PortfolioPage: React.FC = () => {
   };
 
   const handleRefresh = async () => {
-    await Promise.all([loadAccounts(), loadSnapshotAndRisk(), loadEvents(), loadBrokers()]);
+    // 刷新数据时启用实时价格获取
+    await Promise.all([loadAccounts(), loadSnapshotAndRisk(true), loadEvents(), loadBrokers()]);
   };
 
   return (
@@ -554,6 +634,12 @@ const PortfolioPage: React.FC = () => {
                 <button type="button" onClick={() => void handleRefresh()} disabled={isLoading} className="btn-secondary text-sm flex-1">
                   {isLoading ? '刷新中...' : '刷新数据'}
                 </button>
+                <div className="flex-1 flex items-center justify-center gap-1 text-xs">
+                  <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-cyan-400 animate-pulse' : 'bg-gray-500'}`}></span>
+                  <span className={wsConnected ? 'text-cyan-400' : 'text-gray-500'}>
+                    {wsConnected ? '实时' : '离线'}
+                  </span>
+                </div>
               </div>
             </div>
           </div>
@@ -644,15 +730,15 @@ const PortfolioPage: React.FC = () => {
       <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总权益</p>
-          <p className="mt-1 text-xl font-semibold text-white">{formatMoney(snapshot?.totalEquity, snapshot?.currency || 'CNY')}</p>
+          <p className="mt-1 text-xl font-semibold text-white">{formatMoneyNoCurrency(snapshot?.totalEquity)}</p>
         </Card>
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总市值</p>
-          <p className="mt-1 text-xl font-semibold text-white">{formatMoney(snapshot?.totalMarketValue, snapshot?.currency || 'CNY')}</p>
+          <p className="mt-1 text-xl font-semibold text-white">{formatMoneyNoCurrency(snapshot?.totalMarketValue)}</p>
         </Card>
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">总现金</p>
-          <p className="mt-1 text-xl font-semibold text-white">{formatMoney(snapshot?.totalCash, snapshot?.currency || 'CNY')}</p>
+          <p className="mt-1 text-xl font-semibold text-white">{formatMoneyNoCurrency(snapshot?.totalCash)}</p>
         </Card>
         <Card variant="gradient" padding="md">
           <p className="text-xs text-secondary">汇率状态</p>
@@ -675,27 +761,41 @@ const PortfolioPage: React.FC = () => {
                   <tr>
                     <th className="text-left py-2 pr-2">账户</th>
                     <th className="text-left py-2 pr-2">代码</th>
+                    <th className="text-left py-2 pr-2">标的名称</th>
                     <th className="text-right py-2 pr-2">数量</th>
                     <th className="text-right py-2 pr-2">均价</th>
                     <th className="text-right py-2 pr-2">现价</th>
                     <th className="text-right py-2 pr-2">市值</th>
                     <th className="text-right py-2">未实现盈亏</th>
+                    <th className="text-right py-2 pr-2">盈亏比率</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {positionRows.map((row) => (
-                    <tr key={`${row.accountId}-${row.symbol}-${row.market}`} className="border-b border-white/5">
-                      <td className="py-2 pr-2 text-secondary">{row.accountName}</td>
-                      <td className="py-2 pr-2 font-mono text-white">{row.symbol}</td>
-                      <td className="py-2 pr-2 text-right">{row.quantity.toFixed(2)}</td>
-                      <td className="py-2 pr-2 text-right">{row.avgCost.toFixed(4)}</td>
-                      <td className="py-2 pr-2 text-right">{row.lastPrice.toFixed(4)}</td>
-                      <td className="py-2 pr-2 text-right">{formatMoney(row.marketValueBase, row.valuationCurrency)}</td>
-                      <td className={`py-2 text-right ${row.unrealizedPnlBase >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {formatMoney(row.unrealizedPnlBase, row.valuationCurrency)}
-                      </td>
-                    </tr>
-                  ))}
+                  {positionRows.map((row) => {
+                    const rowWithPrice = getPositionWithRealtimePrice(row, realtimePrices);
+                    return (
+                      <tr key={`${row.accountId}-${row.symbol}-${row.market}`} className="border-b border-white/5">
+                        <td className="py-2 pr-2 text-secondary">{row.accountName}</td>
+                        <td className="py-2 pr-2 font-mono text-white">{row.symbol}</td>
+                        <td className="py-2 pr-2 text-white">{row.name || row.symbol}</td>
+                        <td className="py-2 pr-2 text-right">{row.quantity.toFixed(2)}</td>
+                        <td className="py-2 pr-2 text-right">{row.avgCost.toFixed(4)}</td>
+                        <td className="py-2 pr-2 text-right">
+                          <span className={rowWithPrice.isRealtime ? 'text-cyan-400' : ''}>
+                            {rowWithPrice.lastPrice.toFixed(4)}
+                          </span>
+                          {rowWithPrice.isRealtime && <span className="ml-1 text-xs text-cyan-400">●</span>}
+                        </td>
+                        <td className="py-2 pr-2 text-right">{formatMoneyNoCurrency(row.marketValueBase)}</td>
+                        <td className={`py-2 text-right ${row.unrealizedPnlBase >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                          {formatMoneyNoCurrency(row.unrealizedPnlBase)}
+                        </td>
+                        <td className={`py-2 pr-2 text-right ${row.unrealizedPnlBase >= 0 ? 'text-red-400' : 'text-green-400'}`}>
+                          {formatPct((row.unrealizedPnlBase / row.totalCost) * 100, 2)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -746,11 +846,37 @@ const PortfolioPage: React.FC = () => {
         </Card>
         <Card padding="md">
           <h3 className="text-sm font-semibold text-white mb-2">止损接近预警</h3>
-          <div className="text-xs text-secondary space-y-1">
+          <div className="text-xs text-secondary space-y-1 mb-2">
             <div>触发数: {risk?.stopLoss?.triggeredCount ?? 0}</div>
             <div>接近数: {risk?.stopLoss?.nearCount ?? 0}</div>
             <div>告警: {risk?.stopLoss?.nearAlert ? '是' : '否'}</div>
           </div>
+          {risk?.stopLoss?.items && risk.stopLoss.items.length > 0 && (
+            <div className="border-t border-white/10 pt-2 mt-2">
+              <div className="text-xs space-y-1">
+                {risk.stopLoss.items.map((item, idx) => (
+                  <div
+                    key={idx}
+                    className={`flex items-center justify-between px-2 py-1 rounded ${
+                      item.isTriggered
+                        ? 'bg-red-500/20 border border-red-500/40'
+                        : 'bg-amber-500/10 border border-amber-500/30'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono">{item.symbol}</span>
+                      {item.isTriggered && (
+                        <span className="text-xs text-red-300">🛑触发</span>
+                      )}
+                    </div>
+                    <span className="text-red-300 font-mono">
+                      -{item.lossPct.toFixed(2)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </Card>
         <Card padding="md">
           <h3 className="text-sm font-semibold text-white mb-2">口径</h3>
@@ -826,16 +952,21 @@ const PortfolioPage: React.FC = () => {
                 onChange={(e) => setCorpForm((prev) => ({ ...prev, actionType: e.target.value as PortfolioCorporateActionType }))}>
                 <option value="cash_dividend">现金分红</option>
                 <option value="split_adjustment">拆并股调整</option>
+                <option value="bonus_share">送股</option>
               </select>
             </div>
             {corpForm.actionType === 'cash_dividend' ? (
               <input className="input-terminal w-full text-sm" type="number" min="0" step="0.000001" placeholder="每股分红"
                 value={corpForm.cashDividendPerShare}
-                onChange={(e) => setCorpForm((prev) => ({ ...prev, cashDividendPerShare: e.target.value, splitRatio: '' }))} required />
+                onChange={(e) => setCorpForm((prev) => ({ ...prev, cashDividendPerShare: e.target.value, splitRatio: '', bonusQuantity: '' }))} required />
+            ) : corpForm.actionType === 'bonus_share' ? (
+              <input className="input-terminal w-full text-sm" type="number" min="0" step="0.000001" placeholder="送股数量"
+                value={corpForm.bonusQuantity}
+                onChange={(e) => setCorpForm((prev) => ({ ...prev, bonusQuantity: e.target.value, cashDividendPerShare: '', splitRatio: '' }))} required />
             ) : (
               <input className="input-terminal w-full text-sm" type="number" min="0" step="0.000001" placeholder="拆并股比例"
                 value={corpForm.splitRatio}
-                onChange={(e) => setCorpForm((prev) => ({ ...prev, splitRatio: e.target.value, cashDividendPerShare: '' }))} required />
+                onChange={(e) => setCorpForm((prev) => ({ ...prev, splitRatio: e.target.value, cashDividendPerShare: '', bonusQuantity: '' }))} required />
             )}
             <button type="submit" className="btn-secondary w-full" disabled={!writableAccountId}>提交企业行为</button>
           </form>
@@ -933,6 +1064,7 @@ const PortfolioPage: React.FC = () => {
                 <option value="">全部公司行为</option>
                 <option value="cash_dividend">现金分红</option>
                 <option value="split_adjustment">拆并股调整</option>
+                <option value="bonus_share">送股</option>
               </select>
             ) : null}
             <div className="max-h-64 overflow-auto rounded-lg border border-white/10 p-2">
