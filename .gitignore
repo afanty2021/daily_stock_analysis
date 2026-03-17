@@ -77,3 +77,9 @@ CLAUDE.md
 static/
 /apps/dsa-desktop/dist/
 /apps/dsa-desktop/node_modules/
+
+# 记忆目录和数据文件
+MEMORY/
+*.xls
+*.xlsx
+*.csv
