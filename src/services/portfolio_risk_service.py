@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+import sqlite3
 
 from src.config import Config, get_config
 from src.repositories.portfolio_repo import PortfolioRepository
@@ -223,6 +224,7 @@ class PortfolioRiskService:
             for pos in account.get("positions", []):
                 symbol = str(pos.get("symbol") or "").strip().upper()
                 market = str(pos.get("market") or account.get("market") or "").strip().lower()
+                is_etf = bool(pos.get("is_etf", False))
                 if not symbol:
                     continue
 
@@ -235,13 +237,18 @@ class PortfolioRiskService:
                     as_of_date=as_of_date,
                 )
 
-                sector = self._resolve_primary_sector(
-                    symbol=symbol,
-                    market=market,
-                    board_cache=board_cache,
-                    coverage=coverage,
-                    errors=errors,
-                )
+                # ETF 归类到独立板块
+                if is_etf:
+                    sector = "ETF"
+                    coverage["classified_count"] += 1
+                else:
+                    sector = self._resolve_primary_sector(
+                        symbol=symbol,
+                        market=market,
+                        board_cache=board_cache,
+                        coverage=coverage,
+                        errors=errors,
+                    )
                 sector_exposure[sector] = sector_exposure.get(sector, 0.0) + converted
                 sector_symbols.setdefault(sector, set()).add(symbol)
 
@@ -287,11 +294,21 @@ class PortfolioRiskService:
             board_cache[cache_key] = "UNCLASSIFIED"
             return board_cache[cache_key]
 
+        # 先从数据库缓存读取
+        cached_sector = self._get_sector_from_cache(symbol)
+        if cached_sector:
+            coverage["classified_count"] += 1
+            board_cache[cache_key] = cached_sector
+            return board_cache[cache_key]
+
+        # 缓存未命中，调用 API
         try:
             boards = self._fetch_belong_boards(symbol)
             sector_name = self._pick_primary_board_name(boards)
             if sector_name:
                 coverage["classified_count"] += 1
+                # 缓存到数据库
+                self._save_sector_to_cache(symbol, sector_name, market)
                 board_cache[cache_key] = sector_name
                 return board_cache[cache_key]
         except Exception as exc:
@@ -301,6 +318,36 @@ class PortfolioRiskService:
         coverage["unclassified_count"] += 1
         board_cache[cache_key] = "UNCLASSIFIED"
         return board_cache[cache_key]
+
+    def _get_sector_from_cache(self, symbol: str) -> Optional[str]:
+        """从数据库缓存读取板块信息"""
+        try:
+            conn = sqlite3.connect('data/stock_analysis.db')
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT sector FROM stock_sector_cache
+                WHERE symbol = ? AND date(updated_at) > date('now', '-7 days')
+                LIMIT 1
+            """, (symbol,))
+            result = cursor.fetchone()
+            conn.close()
+            return result[0] if result else None
+        except Exception:
+            return None
+
+    def _save_sector_to_cache(self, symbol: str, sector: str, market: str) -> None:
+        """保存板块信息到数据库缓存"""
+        try:
+            conn = sqlite3.connect('data/stock_analysis.db')
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO stock_sector_cache (symbol, sector, market, updated_at, source)
+                VALUES (?, ?, ?, datetime('now'), 'tushare')
+            """, (symbol, sector, market))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
     def _fetch_belong_boards(self, symbol: str) -> List[Dict[str, Any]]:
         manager = self._get_data_manager()
