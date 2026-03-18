@@ -30,6 +30,54 @@ from src.storage import (
 logger = logging.getLogger(__name__)
 
 
+def _get_possible_stock_codes(symbol: str) -> List[str]:
+    """
+    生成可能的股票代码格式列表，用于兼容查询
+
+    支持的格式转换：
+    - 港股：00883 → HK00883, hk00883
+    - A股：600519 → sh600519, 600519.SH
+    - 美股：AAPL → AAPL
+
+    Args:
+        symbol: 原始股票代码
+
+    Returns:
+        可能的代码格式列表
+    """
+    codes = [symbol]  # 原始格式优先
+    code_upper = symbol.upper()
+
+    # 港股格式转换
+    # 00883 → HK00883
+    # hk00883 → HK00883
+    if len(symbol) == 5 and symbol.isdigit():
+        # 5位数字，可能是港股
+        codes.append(f"HK{symbol}")
+    elif code_upper.startswith("HK") and len(symbol) > 2:
+        # HK00883 → 00883
+        codes.append(symbol[2:])
+    elif code_upper.startswith("hk") and len(symbol) > 2:
+        # hk00883 → 00883, HK00883
+        codes.append(symbol[2:])
+        codes.append(f"HK{symbol[2:]}")
+
+    # A股格式转换
+    # 600519 → sh600519, 600519.SH
+    if len(symbol) == 6 and symbol.isdigit():
+        if symbol.startswith(('600', '601', '603', '605', '688')):
+            # 沪市
+            codes.append(f"sh{symbol}")
+            codes.append(f"{symbol}.SH")
+        elif symbol.startswith(('000', '002', '300')):
+            # 深市
+            codes.append(f"sz{symbol}")
+            codes.append(f"{symbol}.SZ")
+
+    # 移除重复值
+    return list(dict.fromkeys(codes))
+
+
 class DuplicateTradeUidError(Exception):
     """Raised when trade_uid conflicts with existing record in one account."""
 
@@ -259,6 +307,31 @@ class PortfolioRepository:
             ).scalar_one_or_none()
             return row is not None
 
+    def has_corporate_action(
+        self,
+        account_id: int,
+        symbol: str,
+        action_type: str,
+        effective_date: date,
+    ) -> bool:
+        """Return True when same corporate action already exists in the account.
+
+        Uniqueness is based on: (account_id, symbol, action_type, effective_date)
+        This prevents duplicate submission of the same bonus/dividend/split event.
+        """
+        with self.db.get_session() as session:
+            row = session.execute(
+                select(PortfolioCorporateAction.id).where(
+                    and_(
+                        PortfolioCorporateAction.account_id == account_id,
+                        PortfolioCorporateAction.symbol == symbol,
+                        PortfolioCorporateAction.action_type == action_type,
+                        PortfolioCorporateAction.effective_date == effective_date,
+                    )
+                ).limit(1)
+            ).scalar_one_or_none()
+            return row is not None
+
     # ------------------------------------------------------------------
     # Event reads
     # ------------------------------------------------------------------
@@ -458,18 +531,35 @@ class PortfolioRepository:
     # Price / FX
     # ------------------------------------------------------------------
     def get_latest_close(self, symbol: str, as_of: date) -> Optional[float]:
+        """
+        获取股票最新收盘价
+
+        支持多种代码格式的兼容查询：
+        - 港股：00883, HK00883, hk00883
+        - A股：600519, sh600519
+        - 美股：AAPL
+        """
         with self.db.get_session() as session:
-            row = session.execute(
-                select(StockDaily)
-                .where(
-                    and_(
-                        StockDaily.code == symbol,
-                        StockDaily.date <= as_of,
+            # 尝试多种代码格式的查询
+            possible_codes = _get_possible_stock_codes(symbol)
+
+            row = None
+            for code in possible_codes:
+                result = session.execute(
+                    select(StockDaily)
+                    .where(
+                        and_(
+                            StockDaily.code == code,
+                            StockDaily.date <= as_of,
+                        )
                     )
-                )
-                .order_by(desc(StockDaily.date))
-                .limit(1)
-            ).scalar_one_or_none()
+                    .order_by(desc(StockDaily.date))
+                    .limit(1)
+                ).scalar_one_or_none()
+                if result is not None:
+                    row = result
+                    break
+
             if row is None or row.close is None:
                 return None
             return float(row.close)

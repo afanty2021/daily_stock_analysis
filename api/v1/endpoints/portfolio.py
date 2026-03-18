@@ -663,19 +663,28 @@ async def websocket_realtime_prices(websocket: WebSocket):
                     })
 
             except json.JSONDecodeError:
-                await _safe_send_json(websocket, {
-                    "type": "error",
-                    "message": "Invalid JSON message",
-                })
+                # 检查连接状态后再发送错误响应
+                if websocket.client_state.name == "connected":
+                    await _safe_send_json(websocket, {
+                        "type": "error",
+                        "message": "Invalid JSON message",
+                    })
             except Exception as e:
+                # 检查是否是断开异常，避免在断开后尝试发送
+                if "disconnect" in str(e).lower() or websocket.client_state.name != "connected":
+                    logger.info(f"WebSocket disconnected, skipping error response: {e}")
+                    raise  # 重新抛出让外层处理
                 logger.error(f"Error handling WebSocket message: {e}")
-                await _safe_send_json(websocket, {
-                    "type": "error",
-                    "message": str(e),
-                })
+                if websocket.client_state.name == "connected":
+                    await _safe_send_json(websocket, {
+                        "type": "error",
+                        "message": str(e),
+                    })
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
     finally:
         # Clean up
         if streaming_task and not streaming_task.done():

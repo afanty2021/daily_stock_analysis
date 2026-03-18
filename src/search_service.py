@@ -547,6 +547,131 @@ class SerpAPISearchProvider(BaseSearchProvider):
             return '未知来源'
 
 
+class SerperSearchProvider(BaseSearchProvider):
+    """
+    Serper.dev 搜索引擎
+
+    特点：
+    - 基于 Google 搜索，结果质量高
+    - 免费版每月 2,500 次请求
+    - 响应速度快（< 1秒）
+    - 简单易用的 REST API
+
+    文档：https://serper.dev/api-reference
+    """
+
+    def __init__(self, api_keys: List[str]):
+        super().__init__(api_keys, "Serper")
+
+    def _do_search(self, query: str, api_key: str, max_results: int, days: int = 7) -> SearchResponse:
+        """执行 Serper 搜索"""
+        url = "https://google.serper.dev/search"
+
+        # Serper API 参数
+        params = {
+            "q": query,
+            "apiKey": api_key,
+            "num": min(max_results, 10),  # Serper 最多返回 10 条
+        }
+
+        # 添加时间范围（通过查询参数）
+        # Serper 不直接支持时间参数，但可以通过查询语法实现
+        # 例如：在 Google 中使用 "after:2023-03-01"
+        if days > 0:
+            from datetime import datetime, timedelta
+            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            # 使用 Google 的日期搜索语法
+            # 注意：这个语法在 Serper 中可能不完全支持，但可以作为尝试
+            params["q"] = f"{query} after:{start_date}"
+
+        headers = {
+            "X-API-KEY": api_key,
+            "Content-Type": "application/json"
+        }
+
+        try:
+            import time as _time
+            api_start = _time.time()
+
+            response = requests.post(url, json=params, headers=headers, timeout=30)
+            response.raise_for_status()
+
+            api_elapsed = _time.time() - api_start
+
+            # 解析 JSON 响应
+            data = response.json()
+
+            # 记录原始响应到日志
+            logger.debug(f"[Serper] 原始响应 keys: {data.keys()}")
+            logger.info(f"[Serper] 搜索完成，query='{query}', 耗时 {api_elapsed:.2f}s")
+
+            # 解析结果
+            results = []
+
+            # Serper 返回的 organic 结果
+            organic = data.get("organic", [])
+            for item in organic[:max_results]:
+                results.append(SearchResult(
+                    title=item.get("title", ""),
+                    snippet=item.get("snippet", "")[:500],
+                    url=item.get("link", ""),
+                    source=self._extract_domain(item.get("link", "")),
+                    published_date=None  # Serper organic 结果通常没有发布日期
+                ))
+
+            # 添加知识图谱结果（如果有）
+            knowledge_graph = data.get("knowledgeGraph")
+            if knowledge_graph:
+                title = knowledge_graph.get("title", "")
+                description = knowledge_graph.get("description", "")
+                if title or description:
+                    results.insert(0, SearchResult(
+                        title=f"[知识图谱] {title}",
+                        snippet=description[:500],
+                        url=knowledge_graph.get("descriptionUrl", ""),
+                        source="Google Knowledge Graph",
+                        published_date=None
+                    ))
+
+            return SearchResponse(
+                query=query,
+                results=results,
+                provider=self.name,
+                success=True,
+                search_time=api_elapsed
+            )
+
+        except requests.exceptions.HTTPError as e:
+            error_msg = str(e)
+            if e.response is not None:
+                try:
+                    error_data = e.response.json()
+                    error_msg = error_data.get("message", error_msg)
+                except:
+                    pass
+
+            # 检查是否是配额问题
+            if "401" in error_msg or "402" in error_msg or "unauthorized" in error_msg.lower():
+                error_msg = f"API Key 无效或配额已用尽: {error_msg}"
+
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=error_msg
+            )
+
+        except Exception as e:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=f"Serper 搜索失败: {str(e)}"
+            )
+
+
 class BochaSearchProvider(BaseSearchProvider):
     """
     博查搜索引擎
@@ -1354,6 +1479,7 @@ class SearchService:
         bocha_keys: Optional[List[str]] = None,
         tavily_keys: Optional[List[str]] = None,
         brave_keys: Optional[List[str]] = None,
+        serper_keys: Optional[List[str]] = None,
         serpapi_keys: Optional[List[str]] = None,
         minimax_keys: Optional[List[str]] = None,
         searxng_base_urls: Optional[List[str]] = None,
@@ -1367,6 +1493,7 @@ class SearchService:
             bocha_keys: 博查搜索 API Key 列表
             tavily_keys: Tavily API Key 列表
             brave_keys: Brave Search API Key 列表
+            serper_keys: Serper.dev API Key 列表
             serpapi_keys: SerpAPI Key 列表
             minimax_keys: MiniMax API Key 列表
             searxng_base_urls: SearXNG 实例地址列表（自建无配额兜底）
@@ -1392,32 +1519,37 @@ class SearchService:
         )
 
         # 初始化搜索引擎（按优先级排序）
-        # 1. Bocha 优先（中文搜索优化，AI摘要）
+        # 1. Serper.dev 优先（基于 Google，中国股票覆盖好，免费额度 2,500 次/月）
+        if serper_keys:
+            self._providers.append(SerperSearchProvider(serper_keys))
+            logger.info(f"已配置 Serper 搜索，共 {len(serper_keys)} 个 API Key")
+
+        # 2. Bocha（中文搜索优化，AI摘要）
         if bocha_keys:
             self._providers.append(BochaSearchProvider(bocha_keys))
             logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
 
-        # 2. Tavily（免费额度更多，每月 1000 次）
+        # 3. Tavily（免费额度更多，每月 1000 次）
         if tavily_keys:
             self._providers.append(TavilySearchProvider(tavily_keys))
             logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
 
-        # 3. Brave Search（隐私优先，全球覆盖）
+        # 4. Brave Search（隐私优先，全球覆盖）
         if brave_keys:
             self._providers.append(BraveSearchProvider(brave_keys))
             logger.info(f"已配置 Brave 搜索，共 {len(brave_keys)} 个 API Key")
 
-        # 4. SerpAPI 作为备选（每月 100 次）
+        # 5. SerpAPI 作为备选（每月 100 次）
         if serpapi_keys:
             self._providers.append(SerpAPISearchProvider(serpapi_keys))
             logger.info(f"已配置 SerpAPI 搜索，共 {len(serpapi_keys)} 个 API Key")
 
-        # 5. MiniMax（Coding Plan Web Search，结构化结果）
+        # 6. MiniMax（Coding Plan Web Search，结构化结果）
         if minimax_keys:
             self._providers.append(MiniMaxSearchProvider(minimax_keys))
             logger.info(f"已配置 MiniMax 搜索，共 {len(minimax_keys)} 个 API Key")
 
-        # 6. SearXNG（自建实例，无配额兜底，最后兜底）
+        # 7. SearXNG（自建实例，无配额兜底，最后兜底）
         if searxng_base_urls:
             self._providers.append(SearXNGSearchProvider(searxng_base_urls))
             logger.info(f"已配置 SearXNG 搜索，共 {len(searxng_base_urls)} 个实例")
@@ -2281,6 +2413,7 @@ def get_search_service() -> SearchService:
             bocha_keys=config.bocha_api_keys,
             tavily_keys=config.tavily_api_keys,
             brave_keys=config.brave_api_keys,
+            serper_keys=config.serper_keys,
             serpapi_keys=config.serpapi_keys,
             minimax_keys=config.minimax_api_keys,
             searxng_base_urls=config.searxng_base_urls,

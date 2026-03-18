@@ -345,6 +345,7 @@ class Config:
     minimax_api_keys: List[str] = field(default_factory=list)  # MiniMax API Keys
     tavily_api_keys: List[str] = field(default_factory=list)  # Tavily API Keys
     brave_api_keys: List[str] = field(default_factory=list)  # Brave Search API Keys
+    serper_keys: List[str] = field(default_factory=list)  # Serper.dev API Keys
     serpapi_keys: List[str] = field(default_factory=list)  # SerpAPI Keys
     searxng_base_urls: List[str] = field(default_factory=list)  # SearXNG instance URLs (self-hosted, no quota)
 
@@ -820,7 +821,8 @@ class Config:
             ]
 
         # 解析搜索引擎 API Keys（支持多个 key，逗号分隔）
-        bocha_keys_str = os.getenv('BOCHA_API_KEYS', '')
+        # 支持单数和复数形式的环境变量名
+        bocha_keys_str = os.getenv('BOCHA_API_KEYS') or os.getenv('BOCHA_API_KEY', '')
         bocha_api_keys = [k.strip() for k in bocha_keys_str.split(',') if k.strip()]
 
         minimax_keys_str = os.getenv('MINIMAX_API_KEYS', '')
@@ -828,7 +830,10 @@ class Config:
         
         tavily_keys_str = os.getenv('TAVILY_API_KEYS', '')
         tavily_api_keys = [k.strip() for k in tavily_keys_str.split(',') if k.strip()]
-        
+
+        serper_keys_str = os.getenv('SERPER_API_KEYS', '')
+        serper_keys = [k.strip() for k in serper_keys_str.split(',') if k.strip()]
+
         serpapi_keys_str = os.getenv('SERPAPI_API_KEYS', '')
         serpapi_keys = [k.strip() for k in serpapi_keys_str.split(',') if k.strip()]
 
@@ -913,6 +918,7 @@ class Config:
             minimax_api_keys=minimax_api_keys,
             tavily_api_keys=tavily_api_keys,
             brave_api_keys=brave_api_keys,
+            serper_keys=serper_keys,
             serpapi_keys=serpapi_keys,
             searxng_base_urls=searxng_base_urls,
             social_sentiment_api_key=os.getenv('SOCIAL_SENTIMENT_API_KEY') or None,

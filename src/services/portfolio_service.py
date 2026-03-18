@@ -248,6 +248,17 @@ class PortfolioService:
             if bonus_quantity is None or bonus_quantity <= 0:
                 raise ValueError("bonus_quantity must be > 0 for bonus_share")
 
+        # 检查是否已存在相同的企业行为记录（防止重复提交）
+        if self.repo.has_corporate_action(
+            account_id=account_id,
+            symbol=symbol_norm,
+            action_type=action_type_norm,
+            effective_date=effective_date,
+        ):
+            raise PortfolioConflictError(
+                f"Corporate action already exists: {symbol_norm} {action_type_norm} on {effective_date}"
+            )
+
         row = self.repo.add_corporate_action(
             account_id=account_id,
             symbol=symbol_norm,
@@ -748,6 +759,13 @@ class PortfolioService:
         unrealized_pnl_base = market_value_base - total_cost_base
         total_equity_base = total_cash_base + market_value_base
 
+        # 计算每个持仓的占比（占总权益的比例）
+        for pos in position_rows:
+            if total_equity_base > 0:
+                pos["weight"] = round(pos["market_value_base"] / total_equity_base, 6)
+            else:
+                pos["weight"] = 0.0
+
         account_payload = {
             "account_id": account.id,
             "account_name": account.name,
@@ -818,19 +836,17 @@ class PortfolioService:
         # 对于数据库中没有的股票，使用港股备用名称映射
         _HK_STOCK_NAMES: Dict[str, str] = {
             "00883": "中国海洋石油",
-            "03800": "保利协鑫能源",
+            "03800": "协鑫科技",
         }
 
         # ========== 并行获取实时价格（优化性能）==========
         realtime_prices: Dict[str, float] = {}
         if use_realtime:
-            # 收集所有需要获取实时价格的股票代码（跳过ETF）
+            # 收集所有需要获取实时价格的股票代码（包括ETF）
             symbols_to_fetch = []
             for key in keys:
                 symbol, _, _ = key
-                is_etf = symbol.startswith(('5', '15', '16', '56', '58', '59'))
-                if not is_etf:
-                    symbols_to_fetch.append(symbol)
+                symbols_to_fetch.append(symbol)
 
             if symbols_to_fetch:
                 realtime_prices = self._fetch_realtime_prices_parallel(symbols_to_fetch)

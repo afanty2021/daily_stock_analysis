@@ -679,36 +679,72 @@ class AkshareFetcher(BaseFetcher):
 
     def _fetch_hk_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
-        获取港股历史数据
-        
-        数据来源：ak.stock_hk_hist()
-        
+        获取港股历史数据（带备用数据源）
+
+        策略：
+        1. 优先尝试东方财富接口 (ak.stock_hk_hist)
+        2. 失败后尝试新浪财经港股接口
+        3. 失败后尝试腾讯财经港股接口
+        4. 最后尝试 Yahoo Finance（yfinance）
+
         Args:
-            stock_code: 港股代码，如 '00700', '01810'
+            stock_code: 港股代码，如 'HK03800', 'HK00883'
             start_date: 开始日期，格式 'YYYY-MM-DD'
             end_date: 结束日期，格式 'YYYY-MM-DD'
-            
+
         Returns:
             港股历史数据 DataFrame
         """
+        # 尝试列表
+        methods = [
+            (self._fetch_hk_data_em, "东方财富"),
+            (self._fetch_hk_data_sina, "新浪财经"),
+            (self._fetch_hk_data_tx, "腾讯财经"),
+            (self._fetch_hk_data_yahoo, "Yahoo Finance"),
+        ]
+
+        last_error = None
+
+        for fetch_method, source_name in methods:
+            try:
+                logger.info(f"[港股数据源] 尝试使用 {source_name} 获取 {stock_code}...")
+                df = fetch_method(stock_code, start_date, end_date)
+
+                if df is not None and not df.empty:
+                    logger.info(f"[港股数据源] {source_name} 获取成功")
+                    return df
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[港股数据源] {source_name} 获取失败: {e}")
+                # 继续尝试下一个
+
+        # 所有都失败
+        raise DataFetchError(f"Akshare 所有港股渠道获取失败: {last_error}")
+
+    def _fetch_hk_data_em(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取港股历史数据 (东方财富)
+
+        数据来源：ak.stock_hk_hist()
+        """
         import akshare as ak
-        
+
         # 防封禁策略 1: 随机 User-Agent
         self._set_random_user_agent()
-        
+
         # 防封禁策略 2: 强制休眠
         self._enforce_rate_limit()
-        
+
         # 确保代码格式正确（5位数字）
         code = stock_code.lower().replace('hk', '').zfill(5)
-        
+
         logger.info(f"[API调用] ak.stock_hk_hist(symbol={code}, period=daily, "
                    f"start_date={start_date.replace('-', '')}, end_date={end_date.replace('-', '')}, adjust=qfq)")
-        
+
         try:
             import time as _time
             api_start = _time.time()
-            
+
             # 调用 akshare 获取港股日线数据
             df = ak.stock_hk_hist(
                 symbol=code,
@@ -717,9 +753,9 @@ class AkshareFetcher(BaseFetcher):
                 end_date=end_date.replace('-', ''),
                 adjust="qfq"  # 前复权
             )
-            
+
             api_elapsed = _time.time() - api_start
-            
+
             # 记录返回数据摘要
             if df is not None and not df.empty:
                 logger.info(f"[API返回] ak.stock_hk_hist 成功: 返回 {len(df)} 行数据, 耗时 {api_elapsed:.2f}s")
@@ -728,18 +764,308 @@ class AkshareFetcher(BaseFetcher):
                 logger.debug(f"[API返回] 最新3条数据:\n{df.tail(3).to_string()}")
             else:
                 logger.warning(f"[API返回] ak.stock_hk_hist 返回空数据, 耗时 {api_elapsed:.2f}s")
-            
+                return pd.DataFrame()
+
             return df
-            
+
         except Exception as e:
             error_msg = str(e).lower()
-            
+
             # 检测反爬封禁
             if any(keyword in error_msg for keyword in ['banned', 'blocked', '频率', 'rate', '限制']):
                 logger.warning(f"检测到可能被封禁: {e}")
-                raise RateLimitError(f"Akshare 可能被限流: {e}") from e
-            
-            raise DataFetchError(f"Akshare 获取港股数据失败: {e}") from e
+                raise RateLimitError(f"Akshare(EM) 港股可能被限流: {e}") from e
+
+            raise e
+
+    def _fetch_hk_data_sina(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取港股历史数据 (新浪财经备用)
+
+        数据来源：新浪财经港股历史数据接口
+
+        注意：这个方法作为备用方案，在东方财富接口失败时使用
+
+        Args:
+            stock_code: 港股代码，如 'HK03800', 'HK00883'
+            start_date: 开始日期，格式 'YYYY-MM-DD'
+            end_date: 结束日期，格式 'YYYY-MM-DD'
+
+        Returns:
+            港股历史数据 DataFrame
+        """
+        import requests
+
+        # 确保代码格式正确（5位数字，去掉HK前缀）
+        code = stock_code.lower().replace('hk', '').zfill(5)
+
+        # 新浪财经港股历史数据接口
+        # 格式：http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getHKStockData
+        url = "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getHKStockData"
+        params = {
+            'symbol': f'hk{code}',
+            'from': start_date.replace('-', ''),
+            'to': end_date.replace('-', '')
+        }
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Referer': 'http://finance.sina.com.cn'
+        }
+
+        logger.info(f"[API调用] 新浪港股历史数据接口: symbol=hk{code}")
+
+        try:
+            import time as _time
+            import json
+            api_start = _time.time()
+
+            response = requests.get(url, params=params, headers=headers, timeout=30)
+            response.encoding = 'utf-8'
+
+            api_elapsed = _time.time() - api_start
+
+            # 新浪返回 JSON 格式数据
+            data = response.text.strip()
+            if not data or data.startswith('var'):
+                # 新浪可能返回 var xxx = {...} 格式
+                if 'var' in data:
+                    data = data.split('=', 1)[1].strip().rstrip(';')
+
+            records = json.loads(data)
+
+            if records and len(records) > 0:
+                # 转换为 DataFrame
+                df = pd.DataFrame(records)
+
+                # 新浪返回的列名映射
+                # {"date":"2026-03-17","open":"10.50","high":"10.80","low":"10.40","close":"10.60","volume":"1234567"}
+                column_mapping = {
+                    'date': '日期',
+                    'open': '开盘',
+                    'high': '最高',
+                    'low': '最低',
+                    'close': '收盘',
+                    'volume': '成交量'
+                }
+                df = df.rename(columns=column_mapping)
+
+                # 确保日期格式正确
+                df['日期'] = pd.to_datetime(df['日期']).dt.strftime('%Y-%m-%d')
+
+                # 计算涨跌幅
+                if '收盘' in df.columns:
+                    df['涨跌幅'] = df['收盘'].astype(float).pct_change() * 100
+                    df['涨跌幅'] = df['涨跌幅'].fillna(0).round(2)
+
+                # 计算成交额
+                if '成交量' in df.columns and '收盘' in df.columns:
+                    df['成交额'] = df['成交量'].astype(float) * df['收盘'].astype(float)
+                else:
+                    df['成交额'] = 0
+
+                logger.info(f"[API返回] 新浪港股成功: 返回 {len(df)} 行数据, 耗时 {api_elapsed:.2f}s")
+                return df
+            else:
+                logger.warning(f"[API返回] 新浪港股返回空数据, 耗时 {api_elapsed:.2f}s")
+                return pd.DataFrame()
+
+        except Exception as e:
+            logger.warning(f"[API错误] 新浪港股获取失败: {e}")
+            raise e
+
+    def _fetch_hk_data_tx(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取港股历史数据 (腾讯财经备用)
+
+        数据来源：腾讯财经港股历史数据接口
+        接口地址：http://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get
+
+        注意：这个方法作为备用方案，在东方财富/新浪接口失败时使用
+
+        Args:
+            stock_code: 港股代码，如 'HK03800', 'HK00883'
+            start_date: 开始日期，格式 'YYYY-MM-DD'
+            end_date: 结束日期，格式 'YYYY-MM-DD'
+
+        Returns:
+            港股历史数据 DataFrame
+        """
+        import requests
+        import json
+
+        # 确保代码格式正确（5位数字，去掉HK前缀）
+        code = stock_code.lower().replace('hk', '').zfill(5)
+
+        # 腾讯财经港股历史数据接口（前复权）
+        # http://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get?param=hk003800,day,2023-01-01,2026-03-17,qfq
+        url = "http://web.ifzq.gtimg.cn/appstock/app/hkfqkline/get"
+
+        # 格式化参数
+        param_str = f"hk{code},day,{start_date.replace('-', '')},{end_date.replace('-', '')},qfq"
+        params = {
+            'param': param_str,
+            '_var': f'hkfqkline_{code}',
+            'r': str(int(__import__('time').time() * 1000))  # 时间戳防缓存
+        }
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Referer': 'http://stockapp.finance.qq.com'
+        }
+
+        logger.info(f"[API调用] 腾讯港股历史数据接口: param={param_str}")
+
+        try:
+            import time as _time
+            api_start = _time.time()
+
+            response = requests.get(url, params=params, headers=headers, timeout=30)
+            response.encoding = 'utf-8'
+
+            api_elapsed = _time.time() - api_start
+
+            # 腾讯返回格式：v_hkfqkline_03800={"code":0,"msg":"","data":{"day":[...],"qfq":[...]}}
+            data = response.text.strip()
+
+            # 去除回调函数名
+            if data.startswith('v_'):
+                data = data.split('=', 1)[1].strip().rstrip(';')
+
+            result = json.loads(data)
+
+            if result.get('code') == 0 and 'data' in result:
+                hk_data = result['data']
+
+                # 优先使用前复权数据
+                kline_data = hk_data.get('qfq', [])
+                if not kline_data:
+                    kline_data = hk_data.get('day', [])
+
+                if kline_data:
+                    # 腾讯数据格式：[日期, 开盘, 收盘, 最高, 最低, 成交量(手), 成交额]
+                    # 例如：["2026-03-17", "10.50", "10.60", "10.80", "10.40", "1234567", "13000000"]
+                    df = pd.DataFrame(kline_data, columns=['日期', '开盘', '收盘', '最高', '最低', '成交量', '成交额'])
+
+                    # 转换数据类型
+                    for col in ['开盘', '收盘', '最高', '最低', '成交量', '成交额']:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                    # 计算涨跌幅
+                    if '收盘' in df.columns:
+                        df['涨跌幅'] = df['收盘'].pct_change() * 100
+                        df['涨跌幅'] = df['涨跌幅'].fillna(0).round(2)
+
+                    # 按日期排序
+                    df = df.sort_values('日期')
+
+                    logger.info(f"[API返回] 腾讯港股成功: 返回 {len(df)} 行数据, 耗时 {api_elapsed:.2f}s")
+                    return df
+                else:
+                    logger.warning(f"[API返回] 腾讯港股返回空数据")
+                    return pd.DataFrame()
+            else:
+                logger.warning(f"[API返回] 腾讯港股返回错误: {result.get('msg', 'Unknown error')}")
+                return pd.DataFrame()
+
+        except Exception as e:
+            logger.warning(f"[API错误] 腾讯港股获取失败: {e}")
+            raise e
+
+    def _fetch_hk_data_yahoo(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        获取港股历史数据 (Yahoo Finance 备用)
+
+        数据来源：yfinance.download()
+
+        注意：这个方法作为备用方案，在东方财富接口失败时使用
+
+        Args:
+            stock_code: 港股代码，如 'HK03800', 'HK00883'
+            start_date: 开始日期，格式 'YYYY-MM-DD'
+            end_date: 结束日期，格式 'YYYY-MM-DD'
+
+        Returns:
+            港股历史数据 DataFrame
+        """
+        import yfinance as yf
+
+        # 转换为 Yahoo Finance 格式
+        # HK03800 -> 0380.HK
+        hk_code = stock_code[2:].lstrip('0') or '0'
+        hk_code = hk_code.zfill(4)
+        yf_code = f"{hk_code}.HK"
+
+        logger.info(f"[API调用] yfinance.download({yf_code}, {start_date}, {end_date})")
+
+        try:
+            import time as _time
+            api_start = _time.time()
+
+            # 使用 yfinance 下载数据
+            df = yf.download(
+                tickers=yf_code,
+                start=start_date,
+                end=end_date,
+                progress=False,
+                auto_adjust=True,
+                multi_level_index=True
+            )
+
+            # 筛选出 yf_code 的列
+            if isinstance(df.columns, pd.MultiIndex) and len(df.columns) > 1:
+                ticker_level = df.columns.get_level_values(1)
+                mask = ticker_level == yf_code
+                if mask.any():
+                    df = df.loc[:, mask].copy()
+
+            api_elapsed = _time.time() - api_start
+
+            if df is not None and not df.empty:
+                logger.info(f"[API返回] yfinance 港股成功: 返回 {len(df)} 行数据, 耗时 {api_elapsed:.2f}s")
+
+                # 标准化为系统格式
+                # 处理 MultiIndex 列名
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
+                # 重置索引
+                df = df.reset_index()
+
+                # 列名映射
+                column_mapping = {
+                    'Date': '日期',
+                    'Open': '开盘',
+                    'High': '最高',
+                    'Low': '最低',
+                    'Close': '收盘',
+                    'Volume': '成交量',
+                }
+                df = df.rename(columns=column_mapping)
+
+                # 计算涨跌幅
+                if '收盘' in df.columns:
+                    df['涨跌幅'] = df['收盘'].pct_change() * 100
+                    df['涨跌幅'] = df['涨跌幅'].fillna(0).round(2)
+
+                # 计算成交额
+                if '成交量' in df.columns and '收盘' in df.columns:
+                    df['成交额'] = df['成交量'] * df['收盘']
+                else:
+                    df['成交额'] = 0
+
+                return df
+            else:
+                logger.warning(f"[API返回] yfinance 港股返回空数据, 耗时 {api_elapsed:.2f}s")
+                return pd.DataFrame()
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            if any(keyword in error_msg for keyword in ['banned', 'blocked', '频率', 'rate', '限制']):
+                logger.warning(f"检测到可能被封禁: {e}")
+                raise RateLimitError(f"yfinance 港股可能被限流: {e}") from e
+
+            raise e
     
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         """
@@ -804,10 +1130,8 @@ class AkshareFetcher(BaseFetcher):
         elif _is_hk_code(stock_code):
             return self._get_hk_realtime_quote(stock_code)
         elif _is_etf_code(stock_code):
-            source_key = "akshare_etf"
-            if not circuit_breaker.is_available(source_key):
-                logger.warning(f"[熔断] 数据源 {source_key} 处于熔断状态，跳过")
-                return None
+            # ETF 有多个备用数据源，由 _get_etf_realtime_quote 内部处理熔断逻辑
+            # 外层不检查熔断，避免阻止备用数据源尝试
             return self._get_etf_realtime_quote(stock_code)
         else:
             source_key = f"akshare_{source}"
@@ -1227,25 +1551,65 @@ class AkshareFetcher(BaseFetcher):
     
     def _get_etf_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
-        获取 ETF 基金实时行情数据
-        
-        数据来源：ak.fund_etf_spot_em()
-        包含：最新价、涨跌幅、成交量、成交额、换手率等
-        
+        获取 ETF 基金实时行情数据（带备用数据源）
+
+        策略：
+        1. 优先尝试东方财富 ETF 接口 (ak.fund_etf_spot_em)
+        2. 失败后尝试新浪财经单股接口
+        3. 最后尝试腾讯财经单股接口
+
         Args:
             stock_code: ETF 代码
-            
+
         Returns:
             UnifiedRealtimeQuote 对象，获取失败返回 None
+        """
+        # 尝试列表
+        methods = [
+            (self._get_etf_realtime_quote_em, "东方财富ETF"),
+            (self._get_etf_realtime_quote_sina, "新浪财经"),
+            (self._get_etf_realtime_quote_tx, "腾讯财经"),
+            (self._get_etf_realtime_quote_tushare, "Tushare"),
+        ]
+
+        last_error = None
+
+        for fetch_method, source_name in methods:
+            try:
+                logger.info(f"[ETF数据源] 尝试使用 {source_name} 获取 {stock_code}...")
+                quote = fetch_method(stock_code)
+
+                if quote is not None:
+                    logger.info(f"[ETF数据源] {source_name} 获取成功")
+                    return quote
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[ETF数据源] {source_name} 获取失败: {e}")
+                # 继续尝试下一个
+
+        # 所有都失败
+        if last_error:
+            logger.error(f"[ETF实时行情] 所有数据源获取失败: {last_error}")
+        return None
+
+    def _get_etf_realtime_quote_em(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """
+        获取 ETF 基金实时行情数据 (东方财富)
+
+        数据来源：ak.fund_etf_spot_em()
         """
         import akshare as ak
         circuit_breaker = get_realtime_circuit_breaker()
         source_key = "akshare_etf"
-        
+
+        # 检查熔断器
+        if not circuit_breaker.is_available(source_key):
+            raise Exception(f"数据源 {source_key} 处于熔断状态")
+
         try:
             # 检查缓存
             current_time = time.time()
-            if (_etf_realtime_cache['data'] is not None and 
+            if (_etf_realtime_cache['data'] is not None and
                 current_time - _etf_realtime_cache['timestamp'] < _etf_realtime_cache['ttl']):
                 df = _etf_realtime_cache['data']
                 logger.debug(f"[缓存命中] 使用缓存的ETF实时行情数据")
@@ -1276,22 +1640,22 @@ class AkshareFetcher(BaseFetcher):
                 if df is None:
                     logger.error(f"[API错误] ak.fund_etf_spot_em 最终失败: {last_error}")
                     circuit_breaker.record_failure(source_key, str(last_error))
-                    df = pd.DataFrame()
+                    raise last_error
                 _etf_realtime_cache['data'] = df
                 _etf_realtime_cache['timestamp'] = current_time
 
             if df is None or df.empty:
                 logger.warning(f"[实时行情] ETF实时行情数据为空，跳过 {stock_code}")
                 return None
-            
+
             # 查找指定 ETF
             row = df[df['代码'] == stock_code]
             if row.empty:
                 logger.warning(f"[API返回] 未找到 ETF {stock_code} 的实时行情")
                 return None
-            
+
             row = row.iloc[0]
-            
+
             # 使用 realtime_types.py 中的统一转换函数
             # ETF 行情数据构建
             quote = UnifiedRealtimeQuote(
@@ -1314,15 +1678,195 @@ class AkshareFetcher(BaseFetcher):
                 high_52w=safe_float(row.get('52周最高')),
                 low_52w=safe_float(row.get('52周最低')),
             )
-            
-            logger.info(f"[ETF实时行情] {stock_code} {quote.name}: 价格={quote.price}, 涨跌={quote.change_pct}%, "
-                       f"换手率={quote.turnover_rate}%")
+
+            logger.info(f"[ETF实时行情-东方财富] {stock_code} {quote.name}: 价格={quote.price}, 涨跌={quote.change_pct}%")
             return quote
-            
+
         except Exception as e:
-            logger.error(f"[API错误] 获取 ETF {stock_code} 实时行情失败: {e}")
-            circuit_breaker.record_failure(source_key, str(e))
-            return None
+            logger.warning(f"[ETF实时行情-东方财富] 获取失败: {e}")
+            raise e
+
+    def _get_etf_realtime_quote_sina(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """
+        获取 ETF 基金实时行情数据 (新浪财经备用)
+
+        数据来源：新浪财经单股接口
+        ETF 代码格式：sh510300 或 sz159915
+        """
+        circuit_breaker = get_realtime_circuit_breaker()
+        source_key = "sina"
+
+        # 确定市场代码
+        if stock_code.startswith('51') or stock_code.startswith('56') or stock_code.startswith('58'):
+            symbol = f"sh{stock_code}"
+        elif stock_code.startswith('15') or stock_code.startswith('16') or stock_code.startswith('18'):
+            symbol = f"sz{stock_code}"
+        else:
+            symbol = stock_code
+
+        try:
+            # 防封禁策略
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            # 新浪财经实时行情接口
+            url = f"http://hq.sinajs.cn/list={symbol}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'http://finance.sina.com.cn'
+            }
+
+            logger.info(f"[API调用] 新浪ETF实时行情接口: {symbol}")
+            import time as _time
+            api_start = _time.time()
+
+            response = requests.get(url, headers=headers, timeout=10)
+            response.encoding = 'gbk'
+
+            api_elapsed = _time.time() - api_start
+
+            # 解析响应
+            content = response.text.strip()
+            if not content or '"' not in content:
+                raise Exception("新浪返回数据为空")
+
+            # 提取数据部分
+            data_start = content.find('"')
+            data_end = content.rfind('"')
+            if data_start == -1 or data_end == -1:
+                raise Exception("新浪数据格式错误")
+
+            data_str = content[data_start+1:data_end]
+            fields = data_str.split(',')
+
+            if len(fields) < 32:
+                raise Exception(f"新浪返回字段不足: {len(fields)} < 32")
+
+            # 新浪数据字段：名称, 开盘, 昨收, 最新价, 最高, 最低, 买一价, 买一量, 卖一价, 卖一量, 成交量...
+            # 涨跌幅需计算
+            name = fields[0]
+            open_price = safe_float(fields[1])
+            pre_close = safe_float(fields[2])
+            price = safe_float(fields[3])
+            high = safe_float(fields[4])
+            low = safe_float(fields[5])
+            volume = safe_int(fields[8]) * 100 if fields[8] else None  # 新浪返回手数，转为股数
+
+            # 计算涨跌幅和涨跌额
+            change_pct = None
+            change_amount = None
+            if price is not None and pre_close is not None and pre_close > 0:
+                change_amount = price - pre_close
+                change_pct = (change_amount / pre_close) * 100
+
+            quote = UnifiedRealtimeQuote(
+                code=stock_code,
+                name=name,
+                source=RealtimeSource.SINA,
+                price=price,
+                change_pct=change_pct,
+                change_amount=change_amount,
+                volume=volume,
+                open_price=open_price,
+                high=high,
+                low=low,
+                pre_close=pre_close,
+            )
+
+            logger.info(f"[ETF实时行情-新浪] {stock_code} {name}: 价格={price}, 涨跌={change_pct}%, 耗时={api_elapsed:.2f}s")
+            return quote
+
+        except Exception as e:
+            logger.warning(f"[ETF实时行情-新浪] 获取失败: {e}")
+            raise e
+
+    def _get_etf_realtime_quote_tx(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """
+        获取 ETF 基金实时行情数据 (腾讯财经备用)
+
+        数据来源：腾讯财经单股接口
+        """
+        circuit_breaker = get_realtime_circuit_breaker()
+        source_key = "tencent"
+
+        # 确定市场代码
+        if stock_code.startswith('51') or stock_code.startswith('56') or stock_code.startswith('58'):
+            market = 1  # 上海
+        elif stock_code.startswith('15') or stock_code.startswith('16') or stock_code.startswith('18'):
+            market = 0  # 深圳
+        else:
+            market = 1  # 默认上海
+
+        try:
+            # 防封禁策略
+            self._set_random_user_agent()
+            self._enforce_rate_limit()
+
+            # 腾讯实时行情接口
+            url = f"http://qt.gtimg.cn/q={stock_code}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'http://stockapp.finance.qq.com'
+            }
+
+            logger.info(f"[API调用] 腾讯ETF实时行情接口: {stock_code}")
+            import time as _time
+            import requests
+            api_start = _time.time()
+
+            response = requests.get(url, headers=headers, timeout=10)
+            response.encoding = 'gbk'
+
+            api_elapsed = _time.time() - api_start
+
+            # 解析响应
+            content = response.text.strip()
+            if not content or '~' not in content:
+                raise Exception("腾讯返回数据为空")
+
+            # 提取数据部分
+            data_start = content.find('"')
+            data_end = content.rfind('"')
+            if data_start == -1 or data_end == -1:
+                raise Exception("腾讯数据格式错误")
+
+            data_str = content[data_start+1:data_end]
+            fields = data_str.split('~')
+
+            if len(fields) < 33:
+                raise Exception(f"腾讯返回字段不足: {len(fields)} < 33")
+
+            # 腾讯数据字段顺序：
+            # 1:名称 2:代码 3:最新价 4:昨收 5:今开 6:成交量(手) ...
+            # 32:涨跌幅(%) 33:最高 34:最低
+            name = fields[1]
+            price = safe_float(fields[3])
+            pre_close = safe_float(fields[4])
+            open_price = safe_float(fields[5])
+            volume = safe_int(fields[6]) * 100 if fields[6] else None  # 腾讯返回手数
+            high = safe_float(fields[32]) if len(fields) > 32 else None
+            low = safe_float(fields[33]) if len(fields) > 33 else None
+            change_pct = safe_float(fields[31]) if len(fields) > 31 else None
+
+            quote = UnifiedRealtimeQuote(
+                code=stock_code,
+                name=name,
+                source=RealtimeSource.TENCENT,
+                price=price,
+                change_pct=change_pct,
+                volume=volume,
+                open_price=open_price,
+                high=high,
+                low=low,
+                pre_close=pre_close,
+            )
+
+            logger.info(f"[ETF实时行情-腾讯] {stock_code} {name}: 价格={price}, 涨跌={change_pct}%, 耗时={api_elapsed:.2f}s")
+            return quote
+
+        except Exception as e:
+            logger.warning(f"[ETF实时行情-腾讯] 获取失败: {e}")
+            raise e
     
     def _get_hk_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
@@ -1452,7 +1996,76 @@ class AkshareFetcher(BaseFetcher):
             logger.error(f"[API错误] 获取港股 {stock_code} 实时行情失败: {e}")
             circuit_breaker.record_failure(source_key, str(e))
             return None
-    
+
+    def _get_etf_realtime_quote_tushare(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """
+        获取 ETF 基金实时行情数据 (Tushare 备用)
+
+        数据来源：Tushare Pro API
+
+        注意：
+        - 需要 TUSHARE_TOKEN 配置
+        - Pro 接口需要积分，但有免费额度
+        - ETF 代码格式：6位数字（510300, 159915）
+
+        Args:
+            stock_code: ETF 代码
+
+        Returns:
+            UnifiedRealtimeQuote 对象，获取失败返回 None
+        """
+        from src.config import get_config
+        config = get_config()
+
+        # 检查 Tushare Token 是否配置
+        tushare_token = config.tushare_token if hasattr(config, 'tushare_token') else os.getenv('TUSHARE_TOKEN')
+        if not tushare_token:
+            raise Exception("TUSHARE_TOKEN 未配置")
+
+        try:
+            import tushare as ts
+
+            # 初始化 Tushare Pro API
+            api = ts.pro_api(tushare_token)
+
+            logger.info(f"[API调用] Tushare Pro ETF实时行情: {stock_code}")
+
+            import time as _time
+            api_start = _time.time()
+
+            # 调用 Tushare Pro 实时行情接口
+            df = api.quotation(ts_code=stock_code)
+
+            api_elapsed = _time.time() - api_start
+
+            if df is None or df.empty:
+                raise Exception("Tushare 返回数据为空")
+
+            row = df.iloc[0]
+
+            # 构建统一行情对象
+            quote = UnifiedRealtimeQuote(
+                code=stock_code,
+                name=str(row.get('name', '')),
+                source=RealtimeSource.TUSHARE,
+                price=float(row.get('price', 0)) if pd.notna(row.get('price')) else None,
+                change_pct=float(row.get('pct_chg', 0)) if pd.notna(row.get('pct_chg')) else None,
+                change_amount=float(row.get('change', 0)) if pd.notna(row.get('change')) else None,
+                volume=int(row.get('vol', 0)) if pd.notna(row.get('vol')) else None,
+                amount=float(row.get('amount', 0)) if pd.notna(row.get('amount')) else None,
+                high=float(row.get('high', 0)) if pd.notna(row.get('high')) else None,
+                low=float(row.get('low', 0)) if pd.notna(row.get('low')) else None,
+                open_price=float(row.get('open', 0)) if pd.notna(row.get('open')) else None,
+                pre_close=float(row.get('pre_close', 0)) if pd.notna(row.get('pre_close')) else None,
+            )
+
+            logger.info(f"[ETF实时行情-Tushare] {stock_code} {quote.name}: 价格={quote.price}, 涨跌={quote.change_pct}%, 耗时={api_elapsed:.2f}s")
+            return quote
+
+        except Exception as e:
+            logger.warning(f"[ETF实时行情-Tushare] 获取失败: {e}")
+            raise e
+
     def get_chip_distribution(self, stock_code: str) -> Optional[ChipDistribution]:
         """
         获取筹码分布数据

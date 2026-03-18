@@ -158,6 +158,7 @@ class PortfolioPositionItem(BaseModel):
     market_value_base: float = Field(alias="marketValueBase")
     unrealized_pnl_base: float = Field(alias="unrealizedPnlBase")
     valuation_currency: str = Field(alias="valuationCurrency")
+    weight: Optional[float] = None  # 持仓占比（0-1之间的小数）
 
     class Config:
         populate_by_name = True  # 允许使用别名字段名

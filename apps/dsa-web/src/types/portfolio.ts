@@ -40,6 +40,7 @@ export interface PortfolioPositionItem {
   marketValueBase: number;
   unrealizedPnlBase: number;
   valuationCurrency: string;
+  weight?: number;  // 持仓占比（0-1之间的小数）
 }
 
 export interface PortfolioAccountSnapshot {

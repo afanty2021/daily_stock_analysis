@@ -104,34 +104,50 @@ class FeishuSender:
     def _send_feishu_chunked(self, content: str, max_bytes: int) -> bool:
         """
         分批发送长消息到飞书
-        
+
         按股票分析块（以 --- 或 ### 分隔）智能分割，确保每批不超过限制
-        
+
         Args:
-            content: 完整消息内容
+            content: 完整消息内容（已包含关键字前缀）
             max_bytes: 单条消息最大字节数
-            
+
         Returns:
             是否全部发送成功
         """
+        # 提取关键字前缀（从第一行开始，到第一个空行为止）
+        keyword_prefix = ""
+        if self._feishu_keywords:
+            keywords = [k.strip() for k in self._feishu_keywords.split(',') if k.strip()]
+            keyword_prefix = '\n'.join(keywords) + '\n'
+
+        # 分块
         chunks = chunk_content_by_max_bytes(content, max_bytes, add_page_marker=True)
-        
+
         # 分批发送
         total_chunks = len(chunks)
         success_count = 0
-        
+
         logger.info(f"飞书分批发送：共 {total_chunks} 批")
-        
+
         for i, chunk in enumerate(chunks):
             try:
-                if self._send_feishu_message(chunk):
+                # 确保每个分块都包含关键字前缀
+                # 检查 chunk 是否已包含关键字（第一块应该已经包含）
+                if keyword_prefix and not chunk.startswith(tuple(keyword_prefix.split('\n')[:1])):
+                    # 没有关键字，添加前缀
+                    chunk_with_keyword = keyword_prefix + chunk
+                    logger.debug(f"飞书第 {i+1} 批添加关键字前缀")
+                else:
+                    chunk_with_keyword = chunk
+
+                if self._send_feishu_message(chunk_with_keyword):
                     success_count += 1
                     logger.info(f"飞书第 {i+1}/{total_chunks} 批发送成功")
                 else:
                     logger.error(f"飞书第 {i+1}/{total_chunks} 批发送失败")
             except Exception as e:
                 logger.error(f"飞书第 {i+1}/{total_chunks} 批发送异常: {e}")
-            
+
             # 批次间隔，避免触发频率限制
             if i < total_chunks - 1:
                 time.sleep(1)
