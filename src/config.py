@@ -43,6 +43,7 @@ class ConfigIssue:
 _MANAGED_LITELLM_KEY_PROVIDERS = {"gemini", "vertex_ai", "anthropic", "openai", "deepseek"}
 SUPPORTED_LLM_CHANNEL_PROTOCOLS = ("openai", "anthropic", "gemini", "vertex_ai", "deepseek", "ollama")
 _FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
+AGENT_MAX_STEPS_DEFAULT = 10
 NEWS_STRATEGY_WINDOWS: Dict[str, int] = {
     "ultra_short": 1,
     "short": 3,
@@ -59,6 +60,96 @@ def parse_env_bool(value: Optional[str], default: bool = False) -> bool:
     if not normalized:
         return default
     return normalized not in _FALSEY_ENV_VALUES
+
+
+def parse_env_int(
+    value: Optional[str],
+    default: int,
+    *,
+    field_name: str,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+    """Parse an integer env value with warning + fallback semantics."""
+    raw_value = value
+    if raw_value is None or not str(raw_value).strip():
+        parsed = int(default)
+    else:
+        try:
+            parsed = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                "%s=%r is not a valid integer; falling back to %s",
+                field_name,
+                raw_value,
+                default,
+            )
+            parsed = int(default)
+
+    if minimum is not None and parsed < minimum:
+        logger.warning(
+            "%s=%r is below minimum %s; clamping to %s",
+            field_name,
+            parsed,
+            minimum,
+            minimum,
+        )
+        parsed = minimum
+    if maximum is not None and parsed > maximum:
+        logger.warning(
+            "%s=%r is above maximum %s; clamping to %s",
+            field_name,
+            parsed,
+            maximum,
+            maximum,
+        )
+        parsed = maximum
+    return parsed
+
+
+def parse_env_float(
+    value: Optional[str],
+    default: float,
+    *,
+    field_name: str,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+    """Parse a float env value with warning + fallback semantics."""
+    raw_value = value
+    if raw_value is None or not str(raw_value).strip():
+        parsed = float(default)
+    else:
+        try:
+            parsed = float(str(raw_value).strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                "%s=%r is not a valid float; falling back to %s",
+                field_name,
+                raw_value,
+                default,
+            )
+            parsed = float(default)
+
+    if minimum is not None and parsed < minimum:
+        logger.warning(
+            "%s=%r is below minimum %s; clamping to %s",
+            field_name,
+            parsed,
+            minimum,
+            minimum,
+        )
+        parsed = minimum
+    if maximum is not None and parsed > maximum:
+        logger.warning(
+            "%s=%r is above maximum %s; clamping to %s",
+            field_name,
+            parsed,
+            maximum,
+            maximum,
+        )
+        parsed = maximum
+    return parsed
 
 
 def normalize_news_strategy_profile(value: Optional[str]) -> str:
@@ -365,7 +456,7 @@ class Config:
     # === Agent 模式配置 ===
     agent_mode: bool = False
     _agent_mode_explicit: bool = False  # True when AGENT_MODE was explicitly set in env
-    agent_max_steps: int = 10
+    agent_max_steps: int = AGENT_MAX_STEPS_DEFAULT
     agent_skills: List[str] = field(default_factory=list)
     agent_strategy_dir: Optional[str] = None
     agent_nl_routing: bool = False  # Enable natural language routing in bot dispatcher
@@ -889,7 +980,7 @@ class Config:
             tickflow_api_key=os.getenv('TICKFLOW_API_KEY'),
             longbridge_app_key=os.getenv('LONGBRIDGE_APP_KEY') or None,
             longbridge_app_secret=os.getenv('LONGBRIDGE_APP_SECRET') or None,
-            longbridge_access_token=os.getenv('LONGBRIDGE_ACCESS_TOKEN') or None
+            longbridge_access_token=os.getenv('LONGBRIDGE_ACCESS_TOKEN') or None,
             litellm_model=litellm_model,
             litellm_fallback_models=litellm_fallback_models,
             llm_temperature=resolve_unified_llm_temperature(litellm_model),
@@ -949,7 +1040,12 @@ class Config:
             bias_threshold=max(1.0, float(os.getenv('BIAS_THRESHOLD', '5.0'))),
             agent_mode=os.getenv('AGENT_MODE', 'false').lower() == 'true',
             _agent_mode_explicit=os.getenv('AGENT_MODE') is not None,
-            agent_max_steps=int(os.getenv('AGENT_MAX_STEPS', '10')),
+            agent_max_steps=parse_env_int(
+                os.getenv('AGENT_MAX_STEPS'),
+                AGENT_MAX_STEPS_DEFAULT,
+                field_name='AGENT_MAX_STEPS',
+                minimum=1,
+            ),
             agent_skills=[s.strip() for s in os.getenv('AGENT_SKILLS', '').split(',') if s.strip()],
             agent_strategy_dir=os.getenv('AGENT_STRATEGY_DIR'),
             agent_nl_routing=os.getenv('AGENT_NL_ROUTING', 'false').lower() == 'true',
