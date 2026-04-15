@@ -670,6 +670,46 @@ class StockNameCache(Base):
         return datetime.now() > record.expires_at
 
 
+class ForecastRecord(Base):
+    """预测记录表 - 存储每次 TimesFM 预测的原始数据"""
+    __tablename__ = 'forecast_records'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query_id = Column(String(64), nullable=False, index=True)
+    stock_code = Column(String(16), nullable=False, index=True)
+    stock_name = Column(String(64), nullable=True)
+    prediction_date = Column(DateTime, default=datetime.now, nullable=False)
+    current_price = Column(Float, nullable=False)
+    point_forecast = Column(Text, nullable=False)  # JSON array string
+    quantile_forecast = Column(Text, nullable=True)  # JSON 2D array string
+    horizon = Column(Integer, nullable=False, default=60)
+    context_length = Column(Integer, nullable=False)
+    model_version = Column(String(32), nullable=True)
+    trend_direction = Column(String(16), nullable=True)  # up/down/sideways/flat
+    evaluated = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ForecastRecord(id={self.id}, stock_code={self.stock_code}, prediction_date={self.prediction_date})>"
+
+
+class ForecastEvaluation(Base):
+    """预测评估表 - 存储预测与实际对比结果"""
+    __tablename__ = 'forecast_evaluations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    forecast_record_id = Column(Integer, ForeignKey('forecast_records.id'), nullable=False, index=True)
+    actual_prices = Column(Text, nullable=False)  # JSON array string
+    mae = Column(Float, nullable=True)
+    mape = Column(Float, nullable=True)
+    rmse = Column(Float, nullable=True)
+    direction_correct = Column(Boolean, nullable=True)
+    evaluated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ForecastEvaluation(id={self.id}, forecast_record_id={self.forecast_record_id}, mape={self.mape})>"
+
+
 class DatabaseManager:
     """
     数据库管理器 - 单例模式

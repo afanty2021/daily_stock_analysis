@@ -70,3 +70,6 @@ python-multipart>=0.0.6     # FastAPI File/Form upload support
 # TimesFM AI 预测
 timesfm>=2.0.0              # Google TimesFM 时间序列预测模型（本地开发版本）
 torch>=2.0.0                # PyTorch 深度学习框架（TimesFM 依赖）
+
+# TimesFM 预测图表
+matplotlib>=3.7.0

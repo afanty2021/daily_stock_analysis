@@ -36,7 +36,7 @@
 | 模块 | 功能 | 说明 |
 |------|------|------|
 | AI | 决策仪表盘 | 一句话核心结论 + 精确买卖点位 + 操作检查清单 |
-| **AI 预测** | **TimesFM 股价预测** | **集成 Google TimesFM 时间序列模型，提供未来 60 天股价预测作为辅助决策参考（需启用 `TIMESFM_ENABLED`）** |
+| **AI 预测** | **TimesFM 股价预测** | **集成 Google TimesFM 时间序列模型，提供未来 60 天股价预测作为辅助决策参考（需启用 `TIMESFM_ENABLED`）；Phase 2 新增：预测图表可视化、历史准确率追踪、协变量支持（成交量/技术指标）、多模型集成、实时预测更新** |
 | 分析 | 多维度分析 | 技术面（盘中实时 MA/多头排列）+ 筹码分布 + 舆情情报 + 实时行情 |
 | 市场 | 全球市场 | 支持 A股、港股、美股及美股指数（SPX、DJI、IXIC 等） |
 | 基本面 | 结构化聚合 | 新增 `fundamental_context`（valuation/growth/earnings/institution/capital_flow/dragon_tiger/boards，其中 `earnings.data` 新增 `financial_report` 与 `dividend`，`boards` 表示板块涨跌榜），主链路 fail-open 降级 |

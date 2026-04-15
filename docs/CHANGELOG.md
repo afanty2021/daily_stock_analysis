@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
 
 - [新功能] 集成 Google TimesFM 时间序列预测模型，提供未来 60 天股价预测作为辅助决策参考（详见 `docs/superpowers/specs/2026-04-15-timesfm-integration-design.md`）；新增 `TIMESFM_ENABLED` 等配置项，支持按需启用；预测失败不影响主分析流程；中英文报告模板自动渲染预测结果。
+- [新功能] TimesFM Phase 2 - 预测图表生成：新增 `GET /api/v1/forecast/chart` 接口，支持返回预测数据的可视化图表；前端自动渲染预测趋势图与置信区间。
+- [新功能] TimesFM Phase 2 - 历史准确率追踪：新增 `forecast_accuracy` 表与 `ForecastAccuracyService`，自动追踪预测准确率指标（MAPE、RMSE、MAE）；支持按时间窗口查看历史表现。
+- [新功能] TimesFM Phase 2 - 协变量支持（XReg）：新增 `TIMESFM_COVARIATES_ENABLED` 与 `TIMESFM_COVARIATE_FEATURES` 配置，支持使用成交量、技术指标等外部特征提升预测精度。
+- [新功能] TimesFM Phase 2 - 多模型集成：新增 `TIMESFM_ENSEMBLE_ENABLED`、`TIMESFM_ENSEMBLE_MODELS`、`TIMESFM_ENSEMBLE_STRATEGY` 配置，支持 TimesFM 与 Naive Seasonal、Moving Average 等基线模型集成预测，提高鲁棒性。
+- [新功能] TimesFM Phase 2 - 实时预测更新：新增 `TIMESFM_REALTIME_UPDATE_ENABLED`、`TIMESFM_CACHE_TTL_MINUTES`、`TIMESFM_UPDATE_ON_PRICE_CHANGE_PCT` 配置，支持基于价格变化和缓存过期的智能更新机制，减少冗余计算。
+- [文档] TimesFM 配置注册表新增 `ai_forecast` 类别，所有 TimesFM 相关配置从 `ai_model` 迁移至 `ai_forecast` 类别，便于管理。
 
 - [修复] 大盘复盘链路接入 `REPORT_LANGUAGE`：`REPORT_LANGUAGE=en` 时，A 股/合并复盘的 Prompt、章节标题、模板兜底文案与通知包装标题统一改为英文，避免出现英文正文外包中文标题的问题。
 - [修复] `AGENT_MAX_STEPS` 在 orchestrator 多 Agent 模式下统一明确为“默认作为各子 Agent 的步数上限而非硬覆盖；TechnicalAgent 等高默认值 Agent 会被封顶、低默认值 Agent 保持原值；当用户主动调高（>10）时，再统一覆盖所有子 Agent 采用全局值”，同时修复用户设置 12 但 TechnicalAgent 仍以默认 6 步运行并报 "Agent exceeded max steps" 的问题（fixes #1026）

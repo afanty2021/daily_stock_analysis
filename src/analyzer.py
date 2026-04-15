@@ -389,6 +389,10 @@ class AnalysisResult:
     current_price: Optional[float] = None  # 分析时的股价
     change_pct: Optional[float] = None     # 分析时的涨跌幅(%)
 
+    # ========== TimesFM 预测历史数据 ==========
+    historical_prices: Optional[List[float]] = None  # 历史收盘价列表（用于 TimesFM 预测）
+    historical_volumes: Optional[List[float]] = None  # 历史成交量列表（用于 TimesFM 协变量）
+
     # ========== 模型标记（Issue #528）==========
     model_used: Optional[str] = None  # 分析使用的 LLM 模型（完整名，如 gemini/gemini-2.0-flash）
 
@@ -2035,6 +2039,9 @@ class GeminiAnalyzer:
                     search_performed=data.get('search_performed', False),
                     data_sources=data.get('data_sources', 'Technical data' if report_language == "en" else '技术面数据'),
                     success=True,
+                    # TimesFM 预测历史数据
+                    historical_prices=context.get('historical_prices'),
+                    historical_volumes=context.get('historical_volumes'),
                 )
             else:
                 # 没有找到 JSON，标记为失败

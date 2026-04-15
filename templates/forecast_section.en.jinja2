@@ -25,6 +25,10 @@
 - **Context Length**: {{ forecast_result.context_length }} trading days
 - **Generated At**: {{ forecast_result.generated_at | replace('T', ' ') | replace('.000000', '') }}
 
+{% if forecast_result and forecast_result.chart_base64 %}
+![Forecast Chart](data:image/png;base64,{{ forecast_result.chart_base64 }})
+{% endif %}
+
 {% if show_detail %}
 {% include 'forecast_table.en.jinja2' %}
 {% endif %}

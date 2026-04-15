@@ -328,6 +328,7 @@ class TimesFMService:
                     "horizon_len": horizon,
                     "frequency": frequency,
                     "input_length": len(data),
+                    "covariates_used": False,
                 },
             }
 
@@ -337,6 +338,137 @@ class TimesFMService:
         except Exception as e:
             logger.error(f"Prediction failed: {e}")
             raise TimesFMServiceError(f"Prediction failed: {e}")
+
+    def predict_with_covariates(
+        self,
+        data: np.ndarray,
+        covariates: np.ndarray,
+        horizon: Optional[int] = None,
+        frequency: str = "D",
+        feature_names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        带协变量的时间序列预测
+
+        TimesFM 2.5 通过 forecast_with_covariates() 方法支持协变量，
+        协变量可以包含成交量、技术指标等外部特征。
+
+        Args:
+            data: 历史数据（一维数组）
+            covariates: 协变量矩阵（二维数组，形状为 [n_samples, n_features]）
+            horizon: 预测长度（None 则使用默认 horizon_len）
+            frequency: 数据频率
+            feature_names: 协变量特征名称列表（可选，用于生成字典键）
+
+        Returns:
+            预测结果字典：
+            - predictions: 预测值数组
+            - trend: 趋势信息
+            - metadata: 元数据（包含协变量信息）
+
+        Raises:
+            InsufficientDataError: 数据不足
+            ValueError: 协变量形状不匹配
+            TimesFMServiceError: 预测错误
+        """
+        # 验证数据
+        self._validate_data(data)
+
+        # 验证协变量
+        if covariates.ndim != 2:
+            raise ValueError(
+                f"Covariates must be 2D array, got {covariates.ndim}D"
+            )
+
+        if len(covariates) != len(data):
+            raise ValueError(
+                f"Covariates length {len(covariates)} != data length {len(data)}"
+            )
+
+        # 确保模型已加载
+        if not self._loaded:
+            self._load_model()
+
+        # 调整预测长度
+        if horizon is None:
+            horizon = self.horizon_len
+
+        # 自适应上下文长度
+        context_len = self._adaptive_context_length(len(data))
+        truncated_data = data[-context_len:]
+        truncated_covariates = covariates[-context_len:]
+
+        # 生成特征名称（如果未提供）
+        if feature_names is None:
+            feature_names = [f"feature_{i}" for i in range(covariates.shape[1])]
+
+        if len(feature_names) != covariates.shape[1]:
+            raise ValueError(
+                f"Number of feature names {len(feature_names)} != "
+                f"number of covariate features {covariates.shape[1]}"
+            )
+
+        try:
+            logger.debug(
+                f"Running prediction with covariates: "
+                f"context_len={context_len}, horizon={horizon}, "
+                f"n_covariate_features={covariates.shape[1]}"
+            )
+
+            # TimesFM 2.5 forecast_with_covariates API
+            # 签名: forecast_with_covariates(
+            #     inputs: list[Sequence[float]],
+            #     dynamic_numerical_covariates: dict[str, Sequence[Sequence[float]]] | None = None,
+            #     ...
+            # )
+            #
+            # dynamic_numerical_covariates 格式: {"feature_name": [[values...]]}
+            # 注意：values 必须是二维列表（每个时间步一个列表）
+
+            # 将协变量数组转换为 TimesFM 期望的字典格式
+            dynamic_numerical_covariates = {}
+            for i, feature_name in enumerate(feature_names):
+                # 提取第 i 列并转换为嵌套列表格式
+                feature_values = truncated_covariates[:, i].tolist()
+                # TimesFM 期望每个特征是一个二维列表（外层是时间步，内层是该时间步的值）
+                dynamic_numerical_covariates[feature_name] = [feature_values]
+
+            # 调用 forecast_with_covariates
+            predictions, quantiles = self._model.forecast_with_covariates(
+                inputs=[truncated_data.tolist()],
+                dynamic_numerical_covariates=dynamic_numerical_covariates,
+            )
+
+            # predictions 是一个数组，形状为 (horizon,)
+            predictions = predictions[0] if len(predictions.shape) > 1 else predictions
+
+            # 计算趋势
+            trend = self._calculate_trend(predictions)
+
+            result = {
+                "predictions": predictions.tolist(),
+                "trend": trend,
+                "metadata": {
+                    "context_len": context_len,
+                    "horizon_len": horizon,
+                    "frequency": frequency,
+                    "input_length": len(data),
+                    "covariates_used": True,
+                    "n_covariate_features": covariates.shape[1],
+                    "feature_names": feature_names,
+                },
+            }
+
+            logger.debug(
+                f"Prediction with covariates completed: "
+                f"trend={trend['direction']}, "
+                f"used_covariates=True"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"Prediction with covariates failed: {e}")
+            raise TimesFMServiceError(f"Prediction with covariates failed: {e}")
 
     def batch_predict(
         self,

@@ -446,12 +446,13 @@ class StockAnalysisPipeline:
             
             # Step 6: 增强上下文数据（添加实时行情、筹码、趋势分析结果、股票名称）
             enhanced_context = self._enhance_context(
-                context, 
-                realtime_quote, 
+                context,
+                realtime_quote,
                 chip_data,
                 trend_result,
                 stock_name,  # 传入股票名称
                 fundamental_context,
+                historical_bars,  # 传入历史行情数据
             )
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
@@ -526,20 +527,23 @@ class StockAnalysisPipeline:
         chip_data: Optional[ChipDistribution],
         trend_result: Optional[TrendAnalysisResult],
         stock_name: str = "",
-        fundamental_context: Optional[Dict[str, Any]] = None
+        fundamental_context: Optional[Dict[str, Any]] = None,
+        historical_bars: Optional[List] = None,
     ) -> Dict[str, Any]:
         """
         增强分析上下文
-        
+
         将实时行情、筹码分布、趋势分析结果、股票名称添加到上下文中
-        
+
         Args:
             context: 原始上下文
             realtime_quote: 实时行情数据（UnifiedRealtimeQuote 或 None）
             chip_data: 筹码分布数据
             trend_result: 趋势分析结果
             stock_name: 股票名称
-            
+            fundamental_context: 基本面数据
+            historical_bars: 历史行情数据列表（用于 TimesFM 预测）
+
         Returns:
             增强后的上下文
         """
@@ -682,6 +686,16 @@ class StockAnalysisPipeline:
                 "invalid fundamental context",
             )
         )
+
+        # Add historical data for TimesFM forecast
+        if historical_bars:
+            enhanced["historical_prices"] = [float(bar.close) for bar in historical_bars if bar.close]
+            enhanced["historical_volumes"] = [float(bar.volume) for bar in historical_bars if bar.volume]
+            logger.debug(
+                f"Added historical data to context: "
+                f"{len(enhanced['historical_prices'])} prices, "
+                f"{len(enhanced['historical_volumes'])} volumes"
+            )
 
         return enhanced
 

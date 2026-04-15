@@ -578,7 +578,28 @@ class Config:
     backtest_min_age_days: int = 14
     backtest_engine_version: str = "v1"
     backtest_neutral_band_pct: float = 2.0
-    
+
+    # === TimesFM AI 预测配置 ===
+    timesfm_enabled: bool = False  # 是否启用 TimesFM 预测
+    timesfm_model_id: str = "google/timesfm-2.5-200m-pytorch"  # TimesFM 模型 ID
+    timesfm_max_context: int = 0  # 最大上下文长度（0=自动）
+    timesfm_max_horizon: int = 60  # 最大预测步长
+    timesfm_cache_dir: Optional[str] = None  # 模型缓存目录
+    timesfm_device: str = "auto"  # 推理设备（auto/cpu/cuda）
+    timesfm_use_quantile_head: bool = True  # 是否使用分位数头
+    timesfm_covariates_enabled: bool = False  # 是否启用协变量支持
+    timesfm_covariate_features: str = "volume_change,ma_deviation"  # 协变量特征列表
+
+    # === TimesFM 集成预测配置（多模型融合）===
+    timesfm_ensemble_enabled: bool = False  # 是否启用集成预测
+    timesfm_ensemble_models: str = "timesfm,naive_seasonal,moving_average"  # 集成模型列表
+    timesfm_ensemble_strategy: str = "weighted_average"  # 集成策略
+
+    # === TimesFM 实时更新配置 ===
+    timesfm_realtime_update_enabled: bool = False  # 是否启用实时预测更新
+    timesfm_cache_ttl_minutes: int = 60  # 预测缓存有效期（分钟）
+    timesfm_update_on_price_change_pct: float = 2.0  # 价格变化超过此值时更新
+
     # === 日志配置 ===
     log_dir: str = "./logs"  # 日志文件目录
     log_level: str = "INFO"  # 日志级别
@@ -1139,6 +1160,24 @@ class Config:
             backtest_min_age_days=int(os.getenv('BACKTEST_MIN_AGE_DAYS', '14')),
             backtest_engine_version=os.getenv('BACKTEST_ENGINE_VERSION', 'v1'),
             backtest_neutral_band_pct=float(os.getenv('BACKTEST_NEUTRAL_BAND_PCT', '2.0')),
+            # TimesFM AI 预测配置
+            timesfm_enabled=os.getenv('TIMESFM_ENABLED', 'false').lower() == 'true',
+            timesfm_model_id=os.getenv('TIMESFM_MODEL_ID', 'google/timesfm-2.5-200m-pytorch'),
+            timesfm_max_context=int(os.getenv('TIMESFM_MAX_CONTEXT', '0')),
+            timesfm_max_horizon=int(os.getenv('TIMESFM_MAX_HORIZON', '60')),
+            timesfm_cache_dir=os.getenv('TIMESFM_CACHE_DIR') or None,
+            timesfm_device=os.getenv('TIMESFM_DEVICE', 'auto'),
+            timesfm_use_quantile_head=os.getenv('TIMESFM_USE_QUANTILE_HEAD', 'true').lower() == 'true',
+            timesfm_covariates_enabled=os.getenv('TIMESFM_COVARIATES_ENABLED', 'false').lower() == 'true',
+            timesfm_covariate_features=os.getenv('TIMESFM_COVARIATE_FEATURES', 'volume_change,ma_deviation'),
+            # TimesFM 集成预测配置
+            timesfm_ensemble_enabled=os.getenv('TIMESFM_ENSEMBLE_ENABLED', 'false').lower() == 'true',
+            timesfm_ensemble_models=os.getenv('TIMESFM_ENSEMBLE_MODELS', 'timesfm,naive_seasonal,moving_average'),
+            timesfm_ensemble_strategy=os.getenv('TIMESFM_ENSEMBLE_STRATEGY', 'weighted_average'),
+            # TimesFM 实时更新配置
+            timesfm_realtime_update_enabled=os.getenv('TIMESFM_REALTIME_UPDATE_ENABLED', 'false').lower() == 'true',
+            timesfm_cache_ttl_minutes=int(os.getenv('TIMESFM_CACHE_TTL_MINUTES', '60')),
+            timesfm_update_on_price_change_pct=float(os.getenv('TIMESFM_UPDATE_ON_PRICE_CHANGE_PCT', '2.0')),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
             max_workers=int(os.getenv('MAX_WORKERS', '3')),
