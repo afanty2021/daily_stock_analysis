@@ -1,0 +1,32 @@
+{# TimesFM Forecast Section - Chinese #}
+{% if forecast_result %}
+## 🤖 AI 预测参考
+
+> ⚠️ **免责声明**: 以下预测由 Google TimesFM AI 模型生成，仅供参考，不构成投资建议。股市有风险，投资需谨慎。
+
+### 预测概要
+
+- **预测周期**: 未来 {{ forecast_result.horizon }} 个交易日
+- **当前价格**: ¥{{ "%.2f"|format(forecast_result.current_price) }}
+- **预测中位数**: ¥{{ "%.2f"|format(forecast_result.median_predicted) }}
+  {% set change_pct = ((forecast_result.median_predicted - forecast_result.current_price) / forecast_result.current_price * 100) %}
+  ({% if change_pct >= 0 %}+{% endif %}{{ "%.2f"|format(change_pct) }}%)
+- **预测区间**: ¥{{ "%.2f"|format(forecast_result.min_predicted) }} -
+  ¥{{ "%.2f"|format(forecast_result.max_predicted) }} (80% 置信区间)
+- **趋势判断**:
+  {% if forecast_result.trend_direction == 'up' %}
+  ↗️ 上涨
+  {% elif forecast_result.trend_direction == 'down' %}
+  ↘️ 下跌
+  {% else %}
+  ➡️ 震荡
+  {% endif %}
+- **模型版本**: {{ forecast_result.model_version }}
+- **上下文长度**: {{ forecast_result.context_length }} 个交易日
+- **生成时间**: {{ forecast_result.generated_at | replace('T', ' ') | replace('.000000', '') }}
+
+{% if show_detail %}
+{% include 'forecast_table.zh.jinja2' %}
+{% endif %}
+
+{% endif %}

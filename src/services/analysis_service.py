@@ -37,6 +37,7 @@ class AnalysisService:
         """初始化分析服务"""
         self.repo = AnalysisRepository()
         self.last_error: Optional[str] = None
+        self._timesfm_service = None
     
     def analyze_stock(
         self,
@@ -113,7 +114,83 @@ class AnalysisService:
             self.last_error = str(e)
             logger.error(f"分析股票 {stock_code} 失败: {e}", exc_info=True)
             return None
-    
+
+    def _run_timesfm_forecast(
+        self,
+        stock_code: str,
+        stock_name: str,
+        historical_prices: list,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        运行 TimesFM 预测
+
+        Args:
+            stock_code: 股票代码
+            stock_name: 股票名称
+            historical_prices: 历史收盘价列表
+
+        Returns:
+            预测结果字典，失败时返回 None
+        """
+        try:
+            from src.config import get_config
+            from src.services.timesfm_service import TimesFMService
+
+            config = get_config()
+
+            # 检查是否启用 TimesFM
+            if not getattr(config, 'timesfm_enabled', False):
+                logger.debug("TimesFM prediction disabled")
+                return None
+
+            # 准备预测参数
+            max_context = getattr(config, 'timesfm_max_context', 0)
+            max_horizon = getattr(config, 'timesfm_max_horizon', 60)
+            device = getattr(config, 'timesfm_device', 'auto')
+
+            # 懒加载 TimesFM 服务
+            if self._timesfm_service is None:
+                self._timesfm_service = TimesFMService(
+                    context_len=max_context if max_context > 0 else 256,
+                    horizon_len=max_horizon,
+                    backend=device if device != 'auto' else 'cpu',
+                )
+
+            # 执行预测
+            import numpy as np
+            prices_array = np.array(historical_prices, dtype=np.float64)
+
+            forecast_result = self._timesfm_service.predict(
+                prices=prices_array,
+                horizon=max_horizon,
+                context_length=max_context if max_context > 0 else None,
+            )
+
+            # 转换为字典格式
+            return {
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "current_price": float(forecast_result.current_price),
+                "prediction_date": forecast_result.prediction_date.isoformat(),
+                "point_forecast": forecast_result.point_forecast.tolist(),
+                "quantile_forecast": forecast_result.quantile_forecast.tolist(),
+                "min_predicted": float(forecast_result.min_predicted),
+                "max_predicted": float(forecast_result.max_predicted),
+                "median_predicted": float(forecast_result.median_predicted),
+                "trend_direction": forecast_result.trend_direction,
+                "context_length": forecast_result.context_length,
+                "horizon": forecast_result.horizon,
+                "model_version": forecast_result.model_version,
+                "generated_at": forecast_result.generated_at.isoformat(),
+            }
+
+        except ImportError as e:
+            logger.warning(f"TimesFM not available: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"TimesFM prediction failed for {stock_code}: {e}")
+            return None
+
     def _build_analysis_response(
         self, 
         result: Any, 
@@ -135,7 +212,16 @@ class AnalysisService:
         sniper_points = {}
         if hasattr(result, 'get_sniper_points'):
             sniper_points = result.get_sniper_points() or {}
-        
+
+        # 运行 TimesFM 预测
+        forecast_result = None
+        if hasattr(result, 'historical_prices') and result.historical_prices:
+            forecast_result = self._run_timesfm_forecast(
+                stock_code=result.code,
+                stock_name=getattr(result, "name", None),
+                historical_prices=result.historical_prices,
+            )
+
         # 计算情绪标签
         report_language = normalize_report_language(getattr(result, "report_language", "zh"))
         sentiment_label = get_sentiment_label(result.sentiment_score, report_language)
@@ -171,7 +257,8 @@ class AnalysisService:
                 "technical_analysis": result.technical_analysis,
                 "fundamental_analysis": result.fundamental_analysis,
                 "risk_warning": result.risk_warning,
-            }
+            },
+            "forecast": forecast_result,
         }
         
         return {

@@ -109,26 +109,21 @@ class TimesFMService:
 
                 logger.info("Loading TimesFM model...")
 
-                if self.model_path:
-                    # 从本地路径加载
-                    self._model = timesfm.TimesFm(
-                        context_len=self.context_len,
-                        horizon_len=self.horizon_len,
-                        input_patch_len=self.DEFAULT_INPUT_PATCH_LEN,
-                        output_patch_len=self.DEFAULT_OUTPUT_PATCH_LEN,
-                        backend=self.backend,
-                    )
-                    self._model.load_from_checkpoint(self.model_path)
-                else:
-                    # 使用官方预训练模型
-                    self._model = timesfm.TimesFm(
-                        context_len=self.context_len,
-                        horizon_len=self.horizon_len,
-                        input_patch_len=self.DEFAULT_INPUT_PATCH_LEN,
-                        output_patch_len=self.DEFAULT_OUTPUT_PATCH_LEN,
-                        backend=self.backend,
-                    )
-                    self._model.load_from_checkpoint(repo_id="google/timesfm-1.0-200m")
+                # 使用本地 TimesFM 2.5 包
+                self._model = timesfm.TimesFM_2p5_200M_torch(
+                    torch_compile=False,  # 禁用 torch compile 加快启动
+                )
+
+                # 创建预测配置
+                forecast_config = timesfm.ForecastConfig(
+                    max_context=self.context_len,
+                    max_horizon=self.horizon_len,
+                )
+
+                # 编译模型（首次调用时会初始化权重）
+                logger.info("Compiling TimesFM model...")
+                self._model.compile(forecast_config=forecast_config)
+                logger.info("TimesFM model compiled successfully")
 
                 self._loaded = True
                 logger.info("TimesFM model loaded successfully")
@@ -311,19 +306,16 @@ class TimesFMService:
                 f"horizon={horizon}, freq={frequency}"
             )
 
-            # TimesFM 预测
-            # forecast 方法期望输入形状为 (batch_size, context_len)
-            predictions = self._model.forecast(
-                truncated_data.reshape(1, -1),
-                freq=[frequency],
+            # TimesFM 2.5 预测
+            # forecast 方法签名: (horizon: int, inputs: list[numpy.ndarray])
+            # 返回: tuple[predictions, quantiles]
+            predictions, quantiles = self._model.forecast(
+                horizon=horizon,
+                inputs=[truncated_data],
             )
 
-            # 提取预测结果
-            if isinstance(predictions, tuple):
-                predictions = predictions[0]  # (mean, optional quantiles)
-
-            # 确保输出长度
-            predictions = predictions[0][:horizon]
+            # predictions 是一个数组，形状为 (horizon,)
+            predictions = predictions[0] if len(predictions.shape) > 1 else predictions
 
             # 计算趋势
             trend = self._calculate_trend(predictions)

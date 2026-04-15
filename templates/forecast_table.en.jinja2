@@ -1,0 +1,20 @@
+{# TimesFM Forecast Table - English #}
+### Detailed Forecast Data
+
+| Trading Day | Median Forecast | 10% Percentile | 25% Percentile | 75% Percentile | 90% Percentile |
+|-------------|-----------------|----------------|----------------|----------------|----------------|
+{% set point = forecast_result.point_forecast %}
+{% set quantile = forecast_result.quantile_forecast %}
+{% for i in range(forecast_result.horizon) %}
+| T+{{ i + 1 }} |
+  ${{ "%.2f"|format(point[i]) }} |
+  ${{ "%.2f"|format(quantile[i][0]) }} |
+  ${{ "%.2f"|format(quantile[i][2]) }} |
+  ${{ "%.2f"|format(quantile[i][6]) }} |
+  ${{ "%.2f"|format(quantile[i][8]) }} |
+{% endfor %}
+
+**Notes**:
+- **Median Forecast**: Most likely price predicted by the model
+- **10%-90% Percentiles**: 80% confidence interval where price is likely to fall
+- Forecasts are based on historical closing prices and do not account for unexpected events or market sentiment changes
