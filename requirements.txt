@@ -66,3 +66,7 @@ jinja2>=3.1.0               # Jinja2 template engine for report rendering
 fastapi>=0.109.0            # 现代 Python Web 框架
 uvicorn[standard]>=0.27.0   # ASGI 服务器
 python-multipart>=0.0.6     # FastAPI File/Form upload support
+
+# TimesFM AI 预测
+timesfm>=2.5.0              # Google TimesFM 时间序列预测模型
+torch>=2.0.0                # PyTorch 深度学习框架（TimesFM 依赖）
