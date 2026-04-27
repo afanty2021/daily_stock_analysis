@@ -37,7 +37,9 @@ class FeishuSender:
         """
         self._feishu_url = getattr(config, 'feishu_webhook_url', None)
         self._feishu_secret = (getattr(config, 'feishu_webhook_secret', None) or '').strip()
-        self._feishu_keyword = (getattr(config, 'feishu_webhook_keyword', None) or '').strip()
+        # 优先读取 feishu_keywords（FEISHU_KEYWORDS），兼容 feishu_webhook_keyword
+        keywords = getattr(config, 'feishu_keywords', None) or getattr(config, 'feishu_webhook_keyword', None) or ''
+        self._feishu_keyword = keywords.strip() if isinstance(keywords, str) else ''
         self._feishu_max_bytes = getattr(config, 'feishu_max_bytes', 20000)
         self._webhook_verify_ssl = getattr(config, 'webhook_verify_ssl', True)
 
@@ -63,6 +65,7 @@ class FeishuSender:
         string_to_sign = f"{timestamp}\n{self._feishu_secret}"
         sign = base64.b64encode(
             hmac.new(
+                self._feishu_secret.encode('utf-8'),
                 string_to_sign.encode('utf-8'),
                 digestmod=hashlib.sha256,
             ).digest()

@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv, dotenv_values
 from dataclasses import dataclass, field
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class ConfigIssue:
@@ -489,6 +491,85 @@ def _uses_direct_env_provider(model: str) -> bool:
     return bool(provider) and provider not in _MANAGED_LITELLM_KEY_PROVIDERS
 
 
+def get_configured_llm_models(model_list: List[Dict[str, Any]]) -> List[str]:
+    """Return non-legacy model names declared in Router model_list order.
+
+    Uses the top-level ``model_name`` (the routing alias that users set in
+    LITELLM_MODEL) rather than ``litellm_params.model`` (the wire-level
+    model identifier).  For channel-built entries both are identical, but
+    YAML configs may define a friendly alias that differs from the
+    underlying provider/model path.
+    """
+    models: List[str] = []
+    seen: set = set()
+    for entry in model_list or []:
+        # Prefer top-level model_name (router routing key); fall back to
+        # litellm_params.model for entries that omit it.
+        name = str(entry.get("model_name") or "").strip()
+        if not name:
+            params = entry.get("litellm_params", {}) or {}
+            name = str(params.get("model") or "").strip()
+        if not name or name.startswith("__legacy_") or name in seen:
+            continue
+        seen.add(name)
+        models.append(name)
+    return models
+
+
+def normalize_agent_litellm_model(
+    model: str,
+    configured_models: Optional[set[str]] = None,
+) -> str:
+    """Normalize AGENT_LITELLM_MODEL while preserving configured router aliases."""
+    normalized_model = (model or "").strip()
+    if not normalized_model:
+        return ""
+    if "/" not in normalized_model:
+        if configured_models and normalized_model in configured_models:
+            return normalized_model
+        return f"openai/{normalized_model}"
+    return normalized_model
+
+
+def get_effective_agent_primary_model(config: "Config") -> str:
+    """Return the effective Agent primary model with fallback inheritance."""
+    configured_router_models = set(
+        get_configured_llm_models(getattr(config, "llm_model_list", []) or [])
+    )
+    configured_agent_model = normalize_agent_litellm_model(
+        getattr(config, "agent_litellm_model", ""),
+        configured_models=configured_router_models,
+    )
+    if configured_agent_model:
+        return configured_agent_model
+    return (getattr(config, "litellm_model", "") or "").strip()
+
+
+def get_effective_agent_models_to_try(config: "Config") -> List[str]:
+    """Return Agent model try-order: primary + global fallbacks (deduped)."""
+    configured_router_models = set(
+        get_configured_llm_models(getattr(config, "llm_model_list", []) or [])
+    )
+    raw_models = [get_effective_agent_primary_model(config)] + (
+        getattr(config, "litellm_fallback_models", []) or []
+    )
+    seen = set()
+    ordered_models: List[str] = []
+    for model in raw_models:
+        normalized_model = (model or "").strip()
+        if not normalized_model:
+            continue
+        dedupe_key = normalize_agent_litellm_model(
+            normalized_model,
+            configured_models=configured_router_models,
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        ordered_models.append(normalized_model)
+    return ordered_models
+
+
 def setup_env(override: bool = False):
     """
     Initialize environment variables from .env file.
@@ -597,6 +678,7 @@ class Config:
     serper_keys: List[str] = field(default_factory=list)  # Serper.dev API Keys
     serpapi_keys: List[str] = field(default_factory=list)  # SerpAPI Keys
     searxng_base_urls: List[str] = field(default_factory=list)  # SearXNG instance URLs (self-hosted, no quota)
+    searxng_public_instances_enabled: bool = True  # Auto-discover public SearXNG instances from searx.space
 
     # === Social Sentiment (US stocks only, api.adanos.org) ===
     social_sentiment_api_key: Optional[str] = None
@@ -1148,6 +1230,10 @@ class Config:
                 "SEARXNG_BASE_URLS 中存在无效 URL，已忽略: %s",
                 ", ".join(invalid_searxng_urls[:3]),
             )
+
+        # SearXNG public instances auto-discovery
+        _searxng_public_enabled_raw = os.getenv('SEARXNG_PUBLIC_INSTANCES_ENABLED', 'true')
+        searxng_public_instances_enabled = parse_env_bool(_searxng_public_enabled_raw, default=True)
 
         # 企微消息类型与最大字节数逻辑
         wechat_msg_type = os.getenv('WECHAT_MSG_TYPE', 'markdown')
