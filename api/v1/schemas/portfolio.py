@@ -161,8 +161,14 @@ class PortfolioPositionItem(BaseModel):
     last_price: float = Field(alias="lastPrice")
     market_value_base: float = Field(alias="marketValueBase")
     unrealized_pnl_base: float = Field(alias="unrealizedPnlBase")
+    unrealized_pnl_pct: Optional[float] = None
     valuation_currency: str = Field(alias="valuationCurrency")
     weight: Optional[float] = None  # 持仓占比（0-1之间的小数）
+    price_source: str = "unknown"
+    price_provider: Optional[str] = None
+    price_date: Optional[str] = None
+    price_stale: bool = False
+    price_available: bool = True
 
     class Config:
         populate_by_name = True  # 允许使用别名字段名

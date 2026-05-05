@@ -39,8 +39,14 @@ export interface PortfolioPositionItem {
   lastPrice: number;
   marketValueBase: number;
   unrealizedPnlBase: number;
+  unrealizedPnlPct?: number | null;
   valuationCurrency: string;
   weight?: number;  // 持仓占比（0-1之间的小数）
+  priceSource?: 'realtime_quote' | 'history_close' | 'missing' | string;
+  priceProvider?: string | null;
+  priceDate?: string | null;
+  priceStale?: boolean;
+  priceAvailable?: boolean;
 }
 
 export interface PortfolioAccountSnapshot {

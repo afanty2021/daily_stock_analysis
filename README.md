@@ -24,8 +24,12 @@
 
 ## 💖 赞助商 (Sponsors)
 <div align="center">
+  <a href="https://open.anspire.cn/?share_code=QFBC0FYC" target="_blank">
+    <img src="./sources/anspire.png" alt="Anspire Open 一站式模型和搜索服务" width="300" height="141" style="width: 300px; height: 141px; object-fit: contain;">
+  </a>
+  &nbsp;&nbsp;
   <a href="https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis" target="_blank">
-    <img src="./sources/serpapi_banner_zh.png" alt="轻松抓取搜索引擎上的实时金融新闻数据 - SerpApi" height="160">
+    <img src="./sources/serpapi_banner_zh.png" alt="轻松抓取搜索引擎上的实时金融新闻数据 - SerpApi" width="300" height="141" style="width: 300px; height: 141px; object-fit: contain;">
   </a>
 </div>
 <br>
@@ -40,9 +44,9 @@
 | 分析 | 多维度分析 | 技术面、实时行情、筹码分布、新闻舆情、公告、资金流与基本面聚合 |
 | 市场 | 全球市场 | 支持 A股、港股、美股、美股指数及常见 ETF |
 | 基本面 | 结构化聚合 | 新增 `fundamental_context`（valuation/growth/earnings/institution/capital_flow/dragon_tiger/boards，其中 `earnings.data` 新增 `financial_report` 与 `dividend`，`boards` 表示板块涨跌榜），主链路 fail-open 降级 |
-| 策略 | 市场策略系统 | 内置 A股「三段式复盘策略」与美股「Regime Strategy」，输出进攻/均衡/防守或 risk-on/neutral/risk-off 计划，并附”仅供参考，不构成投资建议”提示 |
-| 复盘 | 大盘复盘 | 每日市场概览、板块涨跌；支持 cn(A股)/us(美股)/both(两者) 切换 |
-| 界面 | 双主题工作台 | Web 工作台现支持全新浅色主题与深色主题切换，首页 / 问股 / 回测 / 持仓 / 设置统一升级为同一套视觉与交互体系 |
+| 策略 | 市场策略系统 | 内置 A股复盘、美股 Regime、均线、缠论、波浪、情绪周期等策略能力 |
+| 复盘 | 大盘复盘 | 每日市场概览、指数表现、涨跌统计与板块强弱（支持 cn / hk / us / both） |
+| 界面 | 双主题工作台 | 支持手动分析、配置管理、任务进度、历史报告、回测、持仓管理、浅色/深色主题切换 |
 | 补全 | 智能补全 (MVP) | **[测试阶段]** 首页搜索框支持代码/名称/拼音/别名联想；索引已覆盖 A股、港股、美股三个市场，支持通过 Tushare 或 AkShare 数据源更新 |
 | 导入 | 智能导入与补全 | 支持图片、CSV/Excel、剪贴板导入，自选股输入支持代码/名称/拼音/别名补全 |
 | 历史 | 报告管理 | 支持历史报告查看、完整 Markdown 报告、重新分析与批量管理 |
@@ -58,7 +62,7 @@
 
 | 类型 | 支持 |
 |------|------|
-| AI 模型 | [AIHubMix](https://aihubmix.com/?aff=CfMq)、Gemini、OpenAI 兼容、DeepSeek、通义千问、Claude、Ollama 本地模型等（统一通过 [LiteLLM](https://github.com/BerriAI/litellm) 调用，支持多 Key 负载均衡）|
+| AI 模型 | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC)、[AIHubMix](https://aihubmix.com/?aff=CfMq)、Gemini、OpenAI 兼容、DeepSeek、通义千问、Claude、Ollama 本地模型等（统一通过 [LiteLLM](https://github.com/BerriAI/litellm) 调用，支持多 Key 负载均衡）|
 | **AI 预测** | **[Google TimesFM](https://github.com/google-research/timesfm) 时间序列预测模型（需启用 `TIMESFM_ENABLED`）** |
 | 行情数据 | [TickFlow](https://tickflow.org/auth/register?ref=WDSGSPS5XC)、AkShare、Tushare、Pytdx、Baostock、YFinance、[Longbridge](https://open.longbridge.com/)（美股/港股首选数据源） |
 | 新闻搜索 | [Anspire](https://aisearch.anspire.cn/)、[SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)、[Tavily](https://tavily.com/)、[Bocha](https://open.bocha.cn/)、[Brave](https://brave.com/search/api/)、[MiniMax](https://platform.minimaxi.com/)、SearXNG |
@@ -85,11 +89,10 @@
 
 默认先选一个模型服务商并填写 API Key；需要多模型、图片识别、本地模型或高级路由时，再参考 [LLM 配置指南](docs/LLM_CONFIG_GUIDE.md)。
 
-> 💡 **推荐 [AIHubMix](https://aihubmix.com/?aff=CfMq)**：一个 Key 即可使用 Gemini、GPT、Claude、DeepSeek 等全球主流模型，无需科学上网，含免费模型（glm-5、gpt-4o-free 等），付费模型高稳定性无限并发。本项目可享 **10% 充值优惠**。
-
 | Secret 名称 | 说明 | 必填 |
 |------------|------|:----:|
-| `AIHUBMIX_KEY` | [AIHubMix](https://aihubmix.com/?aff=CfMq) API Key，一 Key 切换使用全系模型 | 可选 |
+| `ANSPIRE_API_KEYS` | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC) API Key，一Key同时启用全球热门大模型和联网搜索，无需科学上网，含免费额度 | **推荐** |
+| `AIHUBMIX_KEY` | [AIHubMix](https://aihubmix.com/?aff=CfMq) API Key，一Key切换使用全系模型，无需科学上网，本项目可享 10% 优惠 | **推荐** |
 | `GEMINI_API_KEY` | Google Gemini API Key | 可选 |
 | `ANTHROPIC_API_KEY` | Anthropic Claude API Key | 可选 |
 | `OPENAI_API_KEY` | OpenAI 兼容 API Key（支持 DeepSeek、通义千问等） | 可选 |
@@ -122,7 +125,7 @@
 
 | Secret 名称 | 说明 | 必填 |
 |------------|------|:----:|
-| `ANSPIRE_API_KEYS` | [Anspire AI Search](https://aisearch.anspire.cn/)：中文内容特别优化，可增强 A 股分析效果 | 推荐 |
+| `ANSPIRE_API_KEYS` | [Anspire AI Search](https://aisearch.anspire.cn/)：中文内容特别优化，适合 A 股新闻和舆情检索；同一 Key 可复用为 Anspire 大模型 | 推荐 |
 | `SERPAPI_API_KEYS` | [SerpAPI](https://serpapi.com/baidu-search-api?utm_source=github_daily_stock_analysis)：搜索引擎结果补强，适合实时金融新闻 | 推荐 |
 | `TAVILY_API_KEYS` | [Tavily](https://tavily.com/)：通用新闻搜索 API | 可选 |
 | `BOCHA_API_KEYS` | [博查搜索](https://open.bocha.cn/)：中文搜索优化，支持 AI 摘要 | 可选 |
@@ -249,6 +252,13 @@ python main.py --webui-only
 - 支持自定义策略文件与多 Agent 编排（实验性）
 
 > Agent 具体参数、`skill` 命名兼容、多 Agent 模式和预算护栏见 [完整指南](docs/full-guide.md#本地-webui-管理界面) 与 [LLM 配置指南](docs/LLM_CONFIG_GUIDE.md)。
+
+## 相关项目 (Related Projects)
+
+DSA 聚焦日常分析报告；下面两个同系列项目分别覆盖选股、策略验证与策略进化，适合按需延伸使用。它们当前独立维护，后续会优先探索与 DSA 的候选股导入、回测验证和报告联动。
+
+- [AlphaSift](https://github.com/ZhuLinsen/alphasift)：多因子选股与全市场扫描，用于从股票池中提取候选标的。
+- [AlphaEvo](https://github.com/ZhuLinsen/alphaevo)：策略回测与自我进化，用于验证策略规则，并通过迭代探索策略参数与组合。
 
 ## 🗺️ Roadmap
 

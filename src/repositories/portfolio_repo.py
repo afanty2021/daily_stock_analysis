@@ -648,7 +648,7 @@ class PortfolioRepository:
         account_id: Optional[int],
         date_from: Optional[date],
         date_to: Optional[date],
-        symbol: Optional[str],
+        symbols: Optional[List[str]],
         side: Optional[str],
         page: int,
         page_size: int,
@@ -661,8 +661,8 @@ class PortfolioRepository:
                 conditions.append(PortfolioTrade.trade_date >= date_from)
             if date_to is not None:
                 conditions.append(PortfolioTrade.trade_date <= date_to)
-            if symbol:
-                conditions.append(PortfolioTrade.symbol == symbol)
+            if symbols:
+                conditions.append(PortfolioTrade.symbol.in_(symbols))
             if side:
                 conditions.append(PortfolioTrade.side == side)
 
@@ -725,7 +725,7 @@ class PortfolioRepository:
         account_id: Optional[int],
         date_from: Optional[date],
         date_to: Optional[date],
-        symbol: Optional[str],
+        symbols: Optional[List[str]],
         action_type: Optional[str],
         page: int,
         page_size: int,
@@ -738,8 +738,8 @@ class PortfolioRepository:
                 conditions.append(PortfolioCorporateAction.effective_date >= date_from)
             if date_to is not None:
                 conditions.append(PortfolioCorporateAction.effective_date <= date_to)
-            if symbol:
-                conditions.append(PortfolioCorporateAction.symbol == symbol)
+            if symbols:
+                conditions.append(PortfolioCorporateAction.symbol.in_(symbols))
             if action_type:
                 conditions.append(PortfolioCorporateAction.action_type == action_type)
 
@@ -771,6 +771,21 @@ class PortfolioRepository:
         - A股：600519, sh600519
         - 美股：AAPL
         """
+        close = self.get_latest_close_with_date(symbol=symbol, as_of=as_of)
+        return close[0] if close is not None else None
+
+    def get_latest_close_with_date(self, symbol: str, as_of: date) -> Optional[Tuple[float, date]]:
+        """
+        获取股票最新收盘价及日期
+
+        支持多种代码格式的兼容查询：
+        - 港股：00883, HK00883, hk00883
+        - A股：600519, sh600519
+        - 美股：AAPL
+
+        Returns:
+            (价格, 日期) 元组，如果找不到则返回 None
+        """
         with self.db.get_session() as session:
             # 尝试多种代码格式的查询
             possible_codes = _get_possible_stock_codes(symbol)
@@ -794,7 +809,7 @@ class PortfolioRepository:
 
             if row is None or row.close is None:
                 return None
-            return float(row.close)
+            return float(row.close), row.date
 
     def save_fx_rate(
         self,
