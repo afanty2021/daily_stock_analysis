@@ -6,7 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Dict, Optional
 from unittest.mock import Mock, patch
+
+import requests
 
 from tests.litellm_stub import ensure_litellm_stub
 
@@ -50,6 +53,11 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.manager = ConfigManager(env_path=self.env_path)
         self.service = SystemConfigService(manager=self.manager)
 
+    @staticmethod
+    def _mock_completion_response(content: str = "OK", tool_calls=None):
+        message = SimpleNamespace(content=content, tool_calls=tool_calls or [])
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
     def test_get_config_returns_raw_sensitive_values(self) -> None:
         payload = self.service.get_config(include_schema=True)
         items = {item["key"]: item for item in payload["items"]}
@@ -58,6 +66,57 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(items["GEMINI_API_KEY"]["value"], "secret-key-value")
         self.assertFalse(items["GEMINI_API_KEY"]["is_masked"])
         self.assertTrue(items["GEMINI_API_KEY"]["raw_value_exists"])
+
+    def test_get_config_uses_switch_default_for_missing_report_model_toggle(self) -> None:
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["REPORT_SHOW_LLM_MODEL"]["value"], "true")
+        self.assertFalse(items["REPORT_SHOW_LLM_MODEL"]["raw_value_exists"])
+
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "GEMINI_API_KEY=secret-key-value",
+            "SCHEDULE_TIME=18:00",
+            "LOG_LEVEL=INFO",
+            "REPORT_SHOW_LLM_MODEL=false",
+        )
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["REPORT_SHOW_LLM_MODEL"]["value"], "false")
+        self.assertTrue(items["REPORT_SHOW_LLM_MODEL"]["raw_value_exists"])
+
+    def test_get_config_preserves_explicit_empty_switch_value(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "GEMINI_API_KEY=secret-key-value",
+            "SCHEDULE_TIME=18:00",
+            "LOG_LEVEL=INFO",
+            "WEBHOOK_VERIFY_SSL=",
+        )
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["WEBHOOK_VERIFY_SSL"]["value"], "")
+        self.assertTrue(items["WEBHOOK_VERIFY_SSL"]["raw_value_exists"])
+
+    def test_get_config_preserves_explicit_empty_report_show_llm_model_value(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "GEMINI_API_KEY=secret-key-value",
+            "SCHEDULE_TIME=18:00",
+            "LOG_LEVEL=INFO",
+            "REPORT_SHOW_LLM_MODEL=",
+        )
+
+        payload = self.service.get_config(include_schema=True)
+        items = {item["key"]: item for item in payload["items"]}
+
+        self.assertEqual(items["REPORT_SHOW_LLM_MODEL"]["value"], "")
+        self.assertTrue(items["REPORT_SHOW_LLM_MODEL"]["raw_value_exists"])
 
     def test_get_setup_status_reports_required_gaps_for_empty_config(self) -> None:
         self._rewrite_env("")
@@ -174,6 +233,42 @@ class SystemConfigServiceTestCase(unittest.TestCase):
             status = self.service.get_setup_status()
         slack_complete = next(check for check in status["checks"] if check["key"] == "notification")
         self.assertEqual(slack_complete["status"], "configured")
+
+        self._rewrite_env(*base_lines, "ASTRBOT_URL=https://astrbot.example/webhook")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        astrbot_complete = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(astrbot_complete["status"], "configured")
+
+        self._rewrite_env(*base_lines, "NTFY_URL=https://ntfy.sh/dsa-topic")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        ntfy_complete = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(ntfy_complete["status"], "configured")
+
+        self._rewrite_env(*base_lines, "NTFY_URL=https://ntfy.sh")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        ntfy_without_topic = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(ntfy_without_topic["status"], "optional")
+
+        self._rewrite_env(*base_lines, "GOTIFY_URL=https://gotify.example")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        gotify_partial = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(gotify_partial["status"], "optional")
+
+        self._rewrite_env(*base_lines, "GOTIFY_URL=https://gotify.example", "GOTIFY_TOKEN=app-token")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        gotify_complete = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(gotify_complete["status"], "configured")
+
+        self._rewrite_env(*base_lines, "GOTIFY_URL=https://gotify.example/message", "GOTIFY_TOKEN=app-token")
+        with patch.dict(os.environ, {}, clear=True):
+            status = self.service.get_setup_status()
+        gotify_with_message = next(check for check in status["checks"] if check["key"] == "notification")
+        self.assertEqual(gotify_with_message["status"], "optional")
 
     def test_get_setup_status_uses_runtime_env_without_reloading_singletons(self) -> None:
         self._rewrite_env("")
@@ -336,6 +431,102 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         )
         self.assertFalse(validation["valid"])
         self.assertTrue(any(issue["code"] == "invalid_url" for issue in validation["issues"]))
+
+    def test_validate_reports_ntfy_url_without_topic(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "NTFY_URL", "value": "https://ntfy.sh"}]
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(
+            any(
+                issue["key"] == "NTFY_URL" and issue["code"] == "invalid_ntfy_url"
+                for issue in validation["issues"]
+            )
+        )
+
+    def test_validate_reports_gotify_url_with_message_endpoint(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "GOTIFY_URL", "value": "https://gotify.example/message"}]
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(
+            any(
+                issue["key"] == "GOTIFY_URL" and issue["code"] == "invalid_gotify_url"
+                for issue in validation["issues"]
+            )
+        )
+
+    def test_validate_reports_invalid_notification_route_channel(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "NOTIFICATION_REPORT_CHANNELS", "value": "wechat,not-a-channel,email"}]
+        )
+        self.assertFalse(validation["valid"])
+        self.assertTrue(
+            any(
+                issue["key"] == "NOTIFICATION_REPORT_CHANNELS"
+                and issue["code"] == "invalid_allowed_value"
+                for issue in validation["issues"]
+            )
+        )
+
+    def test_validate_reports_invalid_notification_quiet_hours(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "NOTIFICATION_QUIET_HOURS", "value": "9:00-18:00"}]
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(
+            any(
+                issue["key"] == "NOTIFICATION_QUIET_HOURS"
+                and issue["code"] == "invalid_format"
+                for issue in validation["issues"]
+            )
+        )
+
+    def test_validate_reports_invalid_notification_timezone(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "NOTIFICATION_TIMEZONE", "value": "Mars/Olympus"}]
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(
+            any(
+                issue["key"] == "NOTIFICATION_TIMEZONE"
+                and issue["code"] == "invalid_timezone"
+                for issue in validation["issues"]
+            )
+        )
+
+    def test_validate_reports_invalid_notification_min_severity(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "NOTIFICATION_MIN_SEVERITY", "value": "notice"}]
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(
+            any(
+                issue["key"] == "NOTIFICATION_MIN_SEVERITY"
+                and issue["code"] == "invalid_enum"
+                for issue in validation["issues"]
+            )
+        )
+
+    def test_validate_warns_daily_digest_is_reserved(self) -> None:
+        validation = self.service.validate(
+            items=[{"key": "NOTIFICATION_DAILY_DIGEST_ENABLED", "value": "true"}]
+        )
+
+        self.assertTrue(validation["valid"])
+        self.assertTrue(
+            any(
+                issue["key"] == "NOTIFICATION_DAILY_DIGEST_ENABLED"
+                and issue["code"] == "reserved_notification_daily_digest"
+                and issue["severity"] == "warning"
+                for issue in validation["issues"]
+            )
+        )
 
     def test_validate_warns_when_feishu_app_credentials_are_used_without_webhook(self) -> None:
         validation = self.service.validate(
@@ -836,6 +1027,318 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertFalse(validation["valid"])
         self.assertTrue(any(issue["key"] == "LITELLM_MODEL" and issue["code"] == "missing_runtime_source" for issue in validation["issues"]))
 
+    @staticmethod
+    def _mock_http_response(status_code: int, json_body: Optional[Dict[str, Any]] = None):
+        response = Mock()
+        response.status_code = status_code
+        response.text = "ok" if status_code == 200 else "error"
+        response.json.return_value = json_body or {"errcode": 0}
+        return response
+
+    def _notification_test_env(self):
+        return patch.dict(os.environ, {"ENV_FILE": str(self.env_path)}, clear=True)
+
+    @patch("src.notification_sender.wechat_sender.requests.post")
+    def test_test_notification_channel_uses_temporary_items_without_persisting(self, mock_post) -> None:
+        mock_post.return_value = self._mock_http_response(200, {"errcode": 0})
+
+        with self._notification_test_env():
+            before_instance = Config.get_instance()
+            payload = self.service.test_notification_channel(
+                channel="wechat",
+                items=[{"key": "WECHAT_WEBHOOK_URL", "value": "https://qyapi.example.com/cgi-bin/webhook/send?key=secret"}],
+                title="Test title",
+                content="hello",
+                timeout_seconds=3,
+            )
+            self.assertIs(Config.get_instance(), before_instance)
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["attempts"][0]["latency_ms"] >= 0, True)
+        self.assertIn("key=***", payload["attempts"][0]["target"])
+        self.assertNotIn("WECHAT_WEBHOOK_URL", self.env_path.read_text(encoding="utf-8"))
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], 3)
+
+    def test_test_notification_channel_reports_missing_config(self) -> None:
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="telegram",
+                items=[{"key": "TELEGRAM_BOT_TOKEN", "value": "token"}],
+                title="Test title",
+                content="hello",
+                timeout_seconds=3,
+            )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error_code"], "config_missing")
+        self.assertIn("TELEGRAM_CHAT_ID", payload["message"])
+
+    @patch("src.notification_sender.wechat_sender.requests.post")
+    def test_test_notification_channel_skips_masked_secret_overwrite(self, mock_post) -> None:
+        self._rewrite_env("WECHAT_WEBHOOK_URL=https://saved.example.com/hook?key=savedsecret")
+        mock_post.return_value = self._mock_http_response(200, {"errcode": 0})
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="wechat",
+                items=[{"key": "WECHAT_WEBHOOK_URL", "value": "******"}],
+                mask_token="******",
+                title="Test title",
+                content="hello",
+                timeout_seconds=3,
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(mock_post.call_args[0][0], "https://saved.example.com/hook?key=savedsecret")
+
+    @patch("src.notification_sender.custom_webhook_sender.requests.post")
+    def test_test_notification_channel_returns_custom_webhook_attempts(self, mock_post) -> None:
+        mock_post.side_effect = [
+            self._mock_http_response(500),
+            self._mock_http_response(200),
+        ]
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="custom",
+                items=[
+                    {
+                        "key": "CUSTOM_WEBHOOK_URLS",
+                        "value": (
+                            "https://example.com/robot/send?access_token=first,"
+                            "https://example.com/verylongsecrettoken1234567890"
+                        ),
+                    }
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=4,
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertIn("部分成功", payload["message"])
+        self.assertIn("1/2", payload["message"])
+        self.assertEqual(len(payload["attempts"]), 2)
+        self.assertFalse(payload["attempts"][0]["success"])
+        self.assertTrue(payload["attempts"][1]["success"])
+        self.assertIn("access_token=***", payload["attempts"][0]["target"])
+        self.assertNotIn("verylongsecrettoken1234567890", payload["attempts"][1]["target"])
+        self.assertNotIn("access_token=first", str(payload))
+        self.assertEqual(mock_post.call_args_list[0].kwargs["timeout"], 4)
+
+    @patch("src.notification_sender.custom_webhook_sender.requests.post")
+    def test_test_notification_channel_custom_webhook_all_failures_are_retryable(self, mock_post) -> None:
+        mock_post.side_effect = [
+            self._mock_http_response(500),
+            self._mock_http_response(429),
+        ]
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="custom",
+                items=[
+                    {
+                        "key": "CUSTOM_WEBHOOK_URLS",
+                        "value": (
+                            "https://example.com/robot/send?access_token=first,"
+                            "https://example.com/robot/send?token=second"
+                        ),
+                    }
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=4,
+            )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error_code"], "send_failed")
+        self.assertTrue(payload["retryable"])
+        self.assertIn("失败", payload["message"])
+        self.assertIn("0/2", payload["message"])
+        self.assertEqual(len(payload["attempts"]), 2)
+        self.assertTrue(all(attempt["retryable"] for attempt in payload["attempts"]))
+        self.assertNotIn("access_token=first", str(payload))
+        self.assertNotIn("token=second", str(payload))
+
+    @patch("src.notification_sender.ntfy_sender.requests.post")
+    def test_test_notification_channel_supports_ntfy_and_masks_topic_target(self, mock_post) -> None:
+        mock_post.return_value = self._mock_http_response(200)
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="ntfy",
+                items=[
+                    {"key": "NTFY_URL", "value": "https://ntfy.sh/private-topic"},
+                    {"key": "NTFY_TOKEN", "value": "secret-token"},
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=4,
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(mock_post.call_args.args[0], "https://ntfy.sh")
+        self.assertEqual(mock_post.call_args.kwargs["json"]["topic"], "private-topic")
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["Authorization"], "Bearer secret-token")
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], 4)
+        self.assertIn("https://ntfy.sh/***", payload["attempts"][0]["target"])
+        self.assertNotIn("private-topic", str(payload))
+        self.assertNotIn("NTFY_URL", self.env_path.read_text(encoding="utf-8"))
+
+    @patch("src.notification_sender.ntfy_sender.requests.post")
+    def test_test_notification_channel_rejects_ntfy_url_without_topic(self, mock_post) -> None:
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="ntfy",
+                items=[{"key": "NTFY_URL", "value": "https://ntfy.sh"}],
+                title="Test title",
+                content="hello",
+                timeout_seconds=4,
+            )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error_code"], "config_invalid")
+        self.assertEqual(payload["stage"], "config_validation")
+        self.assertIn("NTFY_URL", payload["message"])
+        mock_post.assert_not_called()
+
+    @patch("src.notification_sender.gotify_sender.requests.post")
+    def test_test_notification_channel_supports_gotify_and_keeps_token_out_of_url(self, mock_post) -> None:
+        mock_post.return_value = self._mock_http_response(200)
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="gotify",
+                items=[
+                    {"key": "GOTIFY_URL", "value": "https://gotify.example"},
+                    {"key": "GOTIFY_TOKEN", "value": "secret-token"},
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=4,
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(mock_post.call_args.args[0], "https://gotify.example/message")
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["X-Gotify-Key"], "secret-token")
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], 4)
+        self.assertEqual(payload["attempts"][0]["target"], "https://gotify.example")
+        self.assertNotIn("secret-token", str(payload))
+        self.assertNotIn("GOTIFY_URL", self.env_path.read_text(encoding="utf-8"))
+
+    @patch("src.notification_sender.gotify_sender.requests.post")
+    def test_test_notification_channel_rejects_gotify_message_endpoint(self, mock_post) -> None:
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="gotify",
+                items=[
+                    {"key": "GOTIFY_URL", "value": "https://gotify.example/message"},
+                    {"key": "GOTIFY_TOKEN", "value": "secret-token"},
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=4,
+            )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error_code"], "config_invalid")
+        self.assertEqual(payload["stage"], "config_validation")
+        self.assertIn("GOTIFY_URL", payload["message"])
+        mock_post.assert_not_called()
+
+    @patch(
+        "src.notification_sender.WechatSender.send_to_wechat",
+        side_effect=requests.exceptions.Timeout(
+            "timeout for https://qyapi.example.com/cgi-bin/webhook/send?key=secret token=abc123"
+        ),
+    )
+    def test_test_notification_channel_classifies_escaped_timeout(self, _mock_send) -> None:
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="wechat",
+                items=[
+                    {
+                        "key": "WECHAT_WEBHOOK_URL",
+                        "value": "https://qyapi.example.com/cgi-bin/webhook/send?key=secret",
+                    }
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=3,
+            )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error_code"], "timeout")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["attempts"][0]["error_code"], "timeout")
+        self.assertIn("key=***", payload["attempts"][0]["target"])
+        self.assertNotIn("key=secret", str(payload))
+        self.assertNotIn("abc123", str(payload))
+
+    @patch("src.notification_sender.telegram_sender.requests.post")
+    def test_test_notification_channel_masks_short_sensitive_target(self, mock_post) -> None:
+        mock_post.return_value = self._mock_http_response(200, {"ok": True})
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="telegram",
+                items=[
+                    {"key": "TELEGRAM_BOT_TOKEN", "value": "tok123"},
+                    {"key": "TELEGRAM_CHAT_ID", "value": "chat-id"},
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=3,
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["attempts"][0]["target"], "***")
+        self.assertNotIn("tok123", str(payload))
+
+    @patch("src.notification_sender.wechat_sender.requests.post")
+    def test_test_notification_channel_strips_url_userinfo_from_target(self, mock_post) -> None:
+        mock_post.return_value = self._mock_http_response(200, {"errcode": 0})
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="wechat",
+                items=[
+                    {
+                        "key": "WECHAT_WEBHOOK_URL",
+                        "value": "https://user:password@example.com/cgi-bin/webhook/send?key=secret",
+                    }
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=3,
+            )
+
+        self.assertTrue(payload["success"])
+        target = payload["attempts"][0]["target"]
+        self.assertIn("https://example.com/cgi-bin/webhook/send?key=***", target)
+        self.assertNotIn("user", target)
+        self.assertNotIn("password", target)
+
+    @patch("src.notification_sender.discord_sender.requests.post")
+    def test_test_notification_channel_prefers_discord_main_channel_alias(self, mock_post) -> None:
+        mock_post.return_value = self._mock_http_response(200)
+
+        with self._notification_test_env():
+            payload = self.service.test_notification_channel(
+                channel="discord",
+                items=[
+                    {"key": "DISCORD_BOT_TOKEN", "value": "bot-token"},
+                    {"key": "DISCORD_MAIN_CHANNEL_ID", "value": "main-channel"},
+                    {"key": "DISCORD_CHANNEL_ID", "value": "legacy-channel"},
+                ],
+                title="Test title",
+                content="hello",
+                timeout_seconds=3,
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertIn("/channels/main-channel/messages", mock_post.call_args[0][0])
+
     @patch("litellm.completion")
     def test_test_llm_channel_returns_success_payload(self, mock_completion) -> None:
         mock_completion.return_value = type(
@@ -857,6 +1360,8 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual(payload["resolved_protocol"], "openai")
         self.assertEqual(payload["resolved_model"], "openai/deepseek-chat")
+        self.assertEqual(payload["capability_results"], {})
+        self.assertEqual(mock_completion.call_count, 1)
 
     @patch("litellm.completion")
     def test_test_llm_channel_falls_back_to_message_content_when_content_blocks_empty(
@@ -952,6 +1457,44 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertEqual(current_map["LITELLM_MODEL"], "openai/kimi-k2.6")
         self.assertEqual(current_map["LLM_TEMPERATURE"], "0.42")
 
+    def test_update_runtime_model_cleanup_does_not_rewrite_temperature(self) -> None:
+        self._rewrite_env(
+            "STOCK_LIST=600519,000001",
+            "LLM_CHANNELS=deepseek",
+            "LLM_DEEPSEEK_PROTOCOL=deepseek",
+            "LLM_DEEPSEEK_BASE_URL=https://api.deepseek.com",
+            "LLM_DEEPSEEK_API_KEY=sk-test-value",
+            "LLM_DEEPSEEK_MODELS=deepseek-chat,deepseek-v4-flash",
+            "LITELLM_MODEL=deepseek/deepseek-chat",
+            "AGENT_LITELLM_MODEL=deepseek/deepseek-v4-flash",
+            "LLM_TEMPERATURE=0.42",
+            "LITELLM_FALLBACK_MODELS=deepseek/deepseek-v4-flash,cohere/command-r-plus",
+            "VISION_MODEL=deepseek/deepseek-chat",
+        )
+
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "LLM_DEEPSEEK_MODELS", "value": "deepseek-v4-flash"},
+                {"key": "LITELLM_MODEL", "value": ""},
+                {"key": "AGENT_LITELLM_MODEL", "value": ""},
+                {"key": "LITELLM_FALLBACK_MODELS", "value": "deepseek/deepseek-v4-flash"},
+                {"key": "VISION_MODEL", "value": ""},
+            ],
+            reload_now=False,
+        )
+
+        self.assertTrue(response["success"])
+        current_map = self.manager.read_config_map()
+        self.assertEqual(current_map["LLM_TEMPERATURE"], "0.42")
+        self.assertEqual(current_map["LITELLM_MODEL"], "")
+        self.assertEqual(current_map["AGENT_LITELLM_MODEL"], "")
+        self.assertEqual(current_map["VISION_MODEL"], "")
+        self.assertEqual(
+            current_map["LITELLM_FALLBACK_MODELS"],
+            "deepseek/deepseek-v4-flash",
+        )
+
     @patch("litellm.completion")
     def test_test_llm_channel_does_not_persist_normalized_kimi_temperature(self, mock_completion) -> None:
         self._rewrite_env("LLM_TEMPERATURE=0.42")
@@ -974,6 +1517,62 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual(mock_completion.call_args.kwargs["temperature"], 1.0)
         self.assertEqual(self.manager.read_config_map()["LLM_TEMPERATURE"], "0.42")
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_omits_temperature_for_gpt5_family(self, mock_completion) -> None:
+        mock_completion.return_value = type(
+            "MockResponse",
+            (),
+            {
+                "choices": [type("Choice", (), {"message": type("Message", (), {"content": "OK"})()})()],
+            },
+        )()
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt5.5-ferr"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["resolved_model"], "openai/gpt5.5-ferr")
+        self.assertNotIn("temperature", mock_completion.call_args.kwargs)
+
+    @patch("litellm.completion")
+    @patch("src.services.system_config_service.Config._load_from_env")
+    def test_test_llm_channel_recovers_from_unsupported_temperature(
+        self,
+        mock_load_config,
+        mock_completion,
+    ) -> None:
+        from src.llm.generation_params import clear_litellm_generation_param_recovery_cache
+
+        clear_litellm_generation_param_recovery_cache()
+        mock_load_config.return_value = SimpleNamespace(llm_temperature=0.42)
+        mock_completion.side_effect = [
+            RuntimeError("Unsupported parameter: temperature is not supported"),
+            type(
+                "MockResponse",
+                (),
+                {
+                    "choices": [type("Choice", (), {"message": type("Message", (), {"content": "OK"})()})()],
+                },
+            )(),
+        ]
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["custom-temp-locked-settings"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(mock_completion.call_args_list[0].kwargs["temperature"], 0.42)
+        self.assertNotIn("temperature", mock_completion.call_args_list[1].kwargs)
 
     @patch("litellm.completion")
     @patch("src.services.system_config_service.Config._load_from_env")
@@ -1047,6 +1646,246 @@ class SystemConfigServiceTestCase(unittest.TestCase):
                 if error_code == "format_error":
                     self.assertIn("choices", payload["error"])
 
+    @patch("litellm.completion")
+    def test_test_llm_channel_marks_requested_capabilities_skipped_when_base_fails(self, mock_completion) -> None:
+        mock_completion.side_effect = PermissionError("401 Unauthorized Bearer sk-secret-value")
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-secret-value",
+            models=["gpt-4o-mini"],
+            capability_checks=["json", "tools"],
+        )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error_code"], "auth")
+        self.assertEqual(payload["details"]["reason"], "api_key_rejected")
+        self.assertEqual(payload["capability_results"]["json"]["status"], "skipped")
+        self.assertEqual(payload["capability_results"]["tools"]["details"]["reason"], "base_test_failed")
+        self.assertEqual(mock_completion.call_count, 1)
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_runs_json_and_tools_capability_checks(self, mock_completion) -> None:
+        tool_call = SimpleNamespace(function=SimpleNamespace(name="dsa_probe_echo"))
+        mock_completion.side_effect = [
+            self._mock_completion_response("OK"),
+            self._mock_completion_response('{"status":"ok"}'),
+            self._mock_completion_response("", tool_calls=[tool_call]),
+        ]
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt-4o-mini"],
+            capability_checks=["tools", "json", "tools"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(list(payload["capability_results"].keys()), ["json", "tools"])
+        self.assertEqual(payload["capability_results"]["json"]["status"], "passed")
+        self.assertEqual(payload["capability_results"]["tools"]["status"], "passed")
+        self.assertEqual(mock_completion.call_count, 3)
+        self.assertEqual(mock_completion.call_args_list[1].kwargs["response_format"], {"type": "json_object"})
+        self.assertEqual(mock_completion.call_args_list[2].kwargs["tool_choice"]["function"]["name"], "dsa_probe_echo")
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_reports_json_capability_failures(self, mock_completion) -> None:
+        mock_completion.side_effect = [
+            self._mock_completion_response("OK"),
+            self._mock_completion_response("not json"),
+        ]
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt-4o-mini"],
+            capability_checks=["json"],
+        )
+
+        self.assertTrue(payload["success"])
+        result = payload["capability_results"]["json"]
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "format_error")
+        self.assertEqual(result["details"]["reason"], "non_json")
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_runs_stream_capability_check_and_closes_stream(self, mock_completion) -> None:
+        class _Stream:
+            def __init__(self):
+                self.closed = False
+
+            def __iter__(self):
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="OK"))])
+
+            def close(self):
+                self.closed = True
+
+        stream = _Stream()
+        mock_completion.side_effect = [
+            self._mock_completion_response("OK"),
+            stream,
+        ]
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt-4o-mini"],
+            capability_checks=["stream"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["capability_results"]["stream"]["status"], "passed")
+        self.assertTrue(stream.closed)
+        self.assertTrue(mock_completion.call_args_list[1].kwargs["stream"])
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_ignores_stream_close_failures(self, mock_completion) -> None:
+        class _Stream:
+            def __init__(self):
+                self.close_attempted = False
+
+            def __iter__(self):
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="OK"))])
+
+            def close(self):
+                self.close_attempted = True
+                raise RuntimeError("transport already closed")
+
+        stream = _Stream()
+        mock_completion.side_effect = [
+            self._mock_completion_response("OK"),
+            stream,
+        ]
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt-4o-mini"],
+            capability_checks=["stream"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["capability_results"]["stream"]["status"], "passed")
+        self.assertTrue(stream.close_attempted)
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_runs_vision_capability_check(self, mock_completion) -> None:
+        mock_completion.side_effect = [
+            self._mock_completion_response("OK"),
+            self._mock_completion_response("OK"),
+        ]
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt-4o-mini"],
+            capability_checks=["vision"],
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["capability_results"]["vision"]["status"], "passed")
+        vision_content = mock_completion.call_args_list[1].kwargs["messages"][0]["content"]
+        self.assertEqual(vision_content[1]["type"], "image_url")
+        self.assertTrue(vision_content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_classifies_capability_unsupported(self, mock_completion) -> None:
+        mock_completion.side_effect = [
+            self._mock_completion_response("OK"),
+            Exception("response_format is not supported"),
+        ]
+
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key="sk-test-value",
+            models=["gpt-4o-mini"],
+            capability_checks=["json"],
+        )
+
+        result = payload["capability_results"]["json"]
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "capability_unsupported")
+        self.assertEqual(result["details"]["reason"], "capability_unsupported")
+
+    @patch("litellm.completion")
+    def test_test_llm_channel_adds_focused_diagnostic_reasons(self, mock_completion) -> None:
+        class RateLimitError(Exception):
+            pass
+
+        cases = [
+            (Exception("account balance insufficient"), "quota", "insufficient_balance"),
+            (RateLimitError("account balance insufficient"), "quota", "insufficient_balance"),
+            (RateLimitError("insufficient_quota"), "quota", "quota_exceeded"),
+            (Exception("account balance insufficient; your request was blocked"), "quota", "insufficient_balance"),
+            (RateLimitError("rate limit: your request was blocked by policy"), "quota", "rate_limit"),
+            (Exception("DNS lookup failed"), "network_error", "dns_error"),
+            (Exception("TLS certificate verify failed"), "network_error", "tls_error"),
+            (Exception("Connection refused"), "network_error", "connection_refused"),
+            (Exception("connection request was blocked by firewall"), "network_error", "network_error"),
+            (Exception("connection blocked by policy"), "network_error", "network_error"),
+            (Exception("request blocked by firewall"), "network_error", "network_error"),
+            (Exception("blocked"), "network_error", "unknown_error"),
+            (Exception("model gpt-4o is not authorized for this account"), "model_not_found", "model_access_denied"),
+            (Exception("litellm.APIError: APIError: OpenAIException - Model disabled."), "model_not_found", "model_access_denied"),
+            (Exception("Model is disabled for this account"), "model_not_found", "model_access_denied"),
+            (
+                Exception("litellm.APIError: APIError: OpenAIException - Your request was blocked."),
+                "request_blocked",
+                "provider_blocked",
+            ),
+            (Exception("Forbidden: your request was blocked by content policy"), "request_blocked", "provider_blocked"),
+            (Exception("blocked by policy"), "request_blocked", "provider_blocked"),
+            (Exception("moderation_blocked"), "request_blocked", "provider_blocked"),
+            (Exception("LLM Provider NOT provided for model foo"), "model_not_found", "provider_prefix_mismatch"),
+        ]
+
+        for exc, error_code, reason in cases:
+            with self.subTest(reason=reason):
+                mock_completion.reset_mock()
+                mock_completion.side_effect = exc
+                payload = self.service.test_llm_channel(
+                    name="primary",
+                    protocol="openai",
+                    base_url="https://api.example.com/v1",
+                    api_key="sk-test-value",
+                    models=["gpt-4o-mini"],
+                )
+
+                self.assertFalse(payload["success"])
+                self.assertEqual(payload["error_code"], error_code)
+                self.assertEqual(payload["details"]["reason"], reason)
+                if reason in {"model_access_denied", "provider_blocked"}:
+                    self.assertFalse(payload["retryable"])
+                    self.assertEqual(payload["details"]["model"], "openai/gpt-4o-mini")
+                    self.assertEqual(payload["resolved_model"], "openai/gpt-4o-mini")
+
+    def test_test_llm_channel_reports_comma_only_api_key_as_missing(self) -> None:
+        payload = self.service.test_llm_channel(
+            name="primary",
+            protocol="openai",
+            base_url="https://api.example.com/v1",
+            api_key=", ,",
+            models=["gpt-4o-mini"],
+        )
+
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["error_code"], "invalid_config")
+        self.assertEqual(payload["details"]["reason"], "missing_api_key")
+
     @patch("src.services.system_config_service.requests.get")
     def test_discover_llm_channel_models_returns_deduped_ids(self, mock_get) -> None:
         mock_response = Mock()
@@ -1088,13 +1927,34 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         auth_response.json.return_value = {"error": {"message": "invalid api key sk-secret-value"}}
         not_found_response = Mock(ok=False, status_code=404, text="not found")
         not_found_response.json.return_value = {"error": {"message": "not found"}}
+        billing_response = Mock(ok=False, status_code=402, text="account balance insufficient")
+        billing_response.json.return_value = {"error": {"message": "account balance insufficient"}}
+        billing_rate_limit_response = Mock(ok=False, status_code=429, text="account balance insufficient")
+        billing_rate_limit_response.json.return_value = {"error": {"message": "account balance insufficient"}}
+        quota_exceeded_response = Mock(ok=False, status_code=429, text="insufficient_quota")
+        quota_exceeded_response.json.return_value = {"error": {"message": "insufficient_quota"}}
+        quota_blocked_response = Mock(ok=False, status_code=403, text="account balance insufficient; your request was blocked")
+        quota_blocked_response.json.return_value = {"error": {"message": "account balance insufficient; your request was blocked"}}
+        rate_limit_response = Mock(ok=False, status_code=429, text="too many requests")
+        rate_limit_response.json.return_value = {"error": {"message": "too many requests"}}
+        blocked_response = Mock(ok=False, status_code=403, text="Forbidden: your request was blocked by content policy")
+        blocked_response.json.return_value = {"error": {"message": "Forbidden: your request was blocked by content policy"}}
+        connection_blocked_response = Mock(ok=False, status_code=403, text="connection blocked by policy")
+        connection_blocked_response.json.return_value = {"error": {"message": "connection blocked by policy"}}
         invalid_json_response = Mock(ok=True, status_code=200, text="<html>bad gateway</html>")
         invalid_json_response.json.side_effect = ValueError("invalid json")
 
-        for response, error_code, stage, retryable in [
-            (auth_response, "auth", "model_discovery", False),
-            (not_found_response, "network_error", "model_discovery", False),
-            (invalid_json_response, "format_error", "response_parse", False),
+        for response, error_code, stage, retryable, reason in [
+            (auth_response, "auth", "model_discovery", False, "api_key_rejected"),
+            (not_found_response, "network_error", "model_discovery", False, "endpoint_not_found"),
+            (billing_response, "quota", "model_discovery", True, "insufficient_balance"),
+            (billing_rate_limit_response, "quota", "model_discovery", True, "insufficient_balance"),
+            (quota_exceeded_response, "quota", "model_discovery", True, "quota_exceeded"),
+            (quota_blocked_response, "quota", "model_discovery", True, "insufficient_balance"),
+            (rate_limit_response, "quota", "model_discovery", True, "rate_limit"),
+            (blocked_response, "request_blocked", "model_discovery", False, "provider_blocked"),
+            (connection_blocked_response, "network_error", "model_discovery", True, "network_error"),
+            (invalid_json_response, "format_error", "response_parse", False, "non_json"),
         ]:
             with self.subTest(error_code=error_code):
                 mock_get.return_value = response
@@ -1109,6 +1969,7 @@ class SystemConfigServiceTestCase(unittest.TestCase):
                 self.assertEqual(payload["error_code"], error_code)
                 self.assertEqual(payload["stage"], stage)
                 self.assertEqual(payload["retryable"], retryable)
+                self.assertEqual(payload["details"]["reason"], reason)
                 if error_code == "auth":
                     self.assertNotIn("sk-secret-value", payload["error"])
 
@@ -1284,9 +2145,63 @@ class SystemConfigServiceTestCase(unittest.TestCase):
         self.assertIn("非 schedule 模式", run_warning)
         self.assertNotIn("以 schedule 模式", run_warning)
         self.assertIn("SCHEDULE_RUN_IMMEDIATELY", schedule_warning)
-        self.assertIn("不会自动重建 scheduler", schedule_warning)
+        self.assertIn("不会因为本次保存启动、停止或重建 scheduler", schedule_warning)
         self.assertIn("以 schedule 模式重新启动后生效", schedule_warning)
         self.assertNotIn("它属于启动期单次运行配置", schedule_warning)
+
+    def test_update_appends_schedule_time_runtime_rebind_warning(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[{"key": "SCHEDULE_TIME", "value": "09:30"}],
+            reload_now=True,
+        )
+
+        self.assertTrue(response["success"])
+        schedule_time_warning = next(
+            warning
+            for warning in response["warnings"]
+            if "SCHEDULE_TIME=09:30 已写入 .env" in warning
+        )
+
+        self.assertIn("已经以 schedule 模式运行", schedule_time_warning)
+        self.assertIn("自动重建 daily job", schedule_time_warning)
+        self.assertIn("不会启动 scheduler", schedule_time_warning)
+        self.assertNotIn("重启当前进程", schedule_time_warning)
+        self.assertNotIn("不会因为本次保存启动、停止或重建 scheduler", schedule_time_warning)
+
+    def test_update_schedule_time_blank_warning_reports_effective_default(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[{"key": "SCHEDULE_TIME", "value": "   "}],
+            reload_now=True,
+        )
+
+        self.assertTrue(response["success"])
+        self.assertTrue(
+            any("SCHEDULE_TIME=18:00 已写入 .env" in warning for warning in response["warnings"]),
+            response["warnings"],
+        )
+
+    def test_update_appends_webui_bind_restart_warning(self) -> None:
+        response = self.service.update(
+            config_version=self.manager.get_config_version(),
+            items=[
+                {"key": "WEBUI_HOST", "value": "0.0.0.0"},
+                {"key": "WEBUI_PORT", "value": "18000"},
+            ],
+            reload_now=True,
+        )
+
+        self.assertTrue(response["success"])
+        bind_warning = next(
+            warning
+            for warning in response["warnings"]
+            if "WEBUI_HOST" in warning and "WEBUI_PORT" in warning
+        )
+
+        self.assertIn("启动期监听配置", bind_warning)
+        self.assertIn("不会因为本次保存重新绑定监听地址或端口", bind_warning)
+        self.assertIn("重启当前进程、Docker 容器或服务管理器后生效", bind_warning)
 
     def test_update_warns_when_runtime_model_references_are_cleared(self) -> None:
         self._rewrite_env(
