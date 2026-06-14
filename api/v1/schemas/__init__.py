@@ -83,6 +83,7 @@ from api.v1.schemas.portfolio import (
     PortfolioCashLedgerListResponse,
     PortfolioCorporateActionListItem,
     PortfolioCorporateActionListResponse,
+    PortfolioPositionAnalysisRequest,
     PortfolioPositionItem,
     PortfolioAccountSnapshot,
     PortfolioSnapshotResponse,
@@ -105,6 +106,13 @@ from api.v1.schemas.alerts import (
     AlertRuleUpdateRequest,
     AlertTriggerItem,
     AlertTriggerListResponse,
+)
+from api.v1.schemas.decision_signals import (
+    DecisionSignalCreateRequest,
+    DecisionSignalItem,
+    DecisionSignalListResponse,
+    DecisionSignalMutationResponse,
+    DecisionSignalStatusUpdateRequest,
 )
 
 __all__ = [
@@ -178,6 +186,7 @@ __all__ = [
     "PortfolioCashLedgerListResponse",
     "PortfolioCorporateActionListItem",
     "PortfolioCorporateActionListResponse",
+    "PortfolioPositionAnalysisRequest",
     "PortfolioPositionItem",
     "PortfolioAccountSnapshot",
     "PortfolioSnapshotResponse",
@@ -199,4 +208,10 @@ __all__ = [
     "AlertRuleUpdateRequest",
     "AlertTriggerItem",
     "AlertTriggerListResponse",
+    # decision signals
+    "DecisionSignalCreateRequest",
+    "DecisionSignalItem",
+    "DecisionSignalListResponse",
+    "DecisionSignalMutationResponse",
+    "DecisionSignalStatusUpdateRequest",
 ]

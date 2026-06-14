@@ -15,6 +15,7 @@ from src.config import get_config
 from src.repositories.portfolio_repo import (
     DuplicateTradeDedupHashError,
     DuplicateTradeUidError,
+    PortfolioBusyError as RepoPortfolioBusyError,
     PortfolioRepository,
 )
 
@@ -24,6 +25,8 @@ except ImportError:
     SearchService = None  # type: ignore[misc, assignment]
 
 logger = logging.getLogger(__name__)
+
+PortfolioBusyError = RepoPortfolioBusyError
 
 try:
     import yfinance as yf
@@ -211,6 +214,8 @@ class PortfolioService:
                     dedup_hash=(dedup_hash or "").strip() or None,
                 )
                 return {"id": int(row.id)}
+        except (DuplicateTradeUidError, DuplicateTradeDedupHashError) as exc:
+            raise PortfolioConflictError(str(exc)) from exc
 
     def record_cash_ledger(
         self,
@@ -307,6 +312,18 @@ class PortfolioService:
                 note=(note or "").strip() or None,
             )
             return {"id": int(row.id)}
+
+    def delete_trade_event(self, trade_id: int) -> bool:
+        with self.repo.portfolio_write_session() as session:
+            return self.repo.delete_trade_in_session(session=session, trade_id=trade_id)
+
+    def delete_cash_ledger_event(self, entry_id: int) -> bool:
+        with self.repo.portfolio_write_session() as session:
+            return self.repo.delete_cash_ledger_in_session(session=session, entry_id=entry_id)
+
+    def delete_corporate_action_event(self, action_id: int) -> bool:
+        with self.repo.portfolio_write_session() as session:
+            return self.repo.delete_corporate_action_in_session(session=session, action_id=action_id)
 
     def list_trade_events(
         self,
@@ -1274,7 +1291,6 @@ class PortfolioService:
                 _add(f"{normalized}.HK")
 
         return values
->>>>>>> upstream/main
 
     @staticmethod
     def _consume_fifo_lots(lots: List[Dict[str, Any]], quantity: float, symbol: str, allow_negative: bool = False) -> float:

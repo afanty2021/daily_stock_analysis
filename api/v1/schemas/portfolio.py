@@ -174,6 +174,12 @@ class PortfolioPositionItem(BaseModel):
         populate_by_name = True  # 允许使用别名字段名
 
 
+class PortfolioPositionAnalysisRequest(BaseModel):
+    account_id: Optional[int] = Field(None, description="Optional account id; required when a symbol is held in multiple accounts")
+    analysis_phase: Literal["auto", "premarket", "intraday", "postmarket"] = "auto"
+    force: bool = Field(False, description="Force refresh analysis inputs without bypassing duplicate in-flight tasks")
+
+
 class PortfolioAccountSnapshot(BaseModel):
     account_id: int
     account_name: str

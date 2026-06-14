@@ -259,7 +259,9 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         "DEBUG",
         "MAX_WORKERS",
         "ANALYSIS_DELAY",
+        "SAVE_CONTEXT_SNAPSHOT",
         "MARKET_REVIEW_ENABLED",
+        "DAILY_MARKET_CONTEXT_ENABLED",
         "MARKET_REVIEW_REGION",
         "MARKET_REVIEW_COLOR_SCHEME",
         # Issue #1512: stream, log, and WebUI startup fields
@@ -299,6 +301,21 @@ class TestSettingsHelpMetadata(unittest.TestCase):
         field = get_field_definition("WEBUI_HOST")
         self.assertEqual(field["category"], "system")
         self.assertNotEqual(field["display_order"], 9000)
+
+    def test_save_context_snapshot_is_explicitly_registered(self):
+        field = get_field_definition("SAVE_CONTEXT_SNAPSHOT")
+
+        self.assertEqual(field["category"], "system")
+        self.assertEqual(field["data_type"], "boolean")
+        self.assertEqual(field["ui_control"], "switch")
+        self.assertFalse(field["is_sensitive"])
+        self.assertTrue(field["is_editable"])
+        self.assertEqual(field["default_value"], "true")
+        self.assertEqual(field["display_order"], 52)
+        self.assertEqual(field["help_key"], "settings.system.SAVE_CONTEXT_SNAPSHOT")
+        self.assertTrue(field.get("examples"))
+        self.assertTrue(field.get("docs"))
+        self.assertIn("analysis-context-pack.md#p6-", field["docs"][0]["href"])
 
     def test_restart_warning_codes_match_runtime_behavior(self):
         restart_required_keys = (
@@ -620,12 +637,21 @@ class TestMarketReviewFieldsRegistered(unittest.TestCase):
         self.assertEqual(field["validation"]["enum"], ["green_up", "red_up"])
         self.assertFalse(field["is_sensitive"])
 
+    def test_daily_market_context_field_definition_exists(self):
+        field = get_field_definition("DAILY_MARKET_CONTEXT_ENABLED")
+        self.assertEqual(field["category"], "system")
+        self.assertEqual(field["data_type"], "boolean")
+        self.assertEqual(field["ui_control"], "switch")
+        self.assertEqual(field["default_value"], "true")
+        self.assertFalse(field["is_sensitive"])
+
     def test_schema_response_includes_market_review_color_scheme(self):
         schema = build_schema_response()
         system_cat = next((c for c in schema["categories"] if c["category"] == "system"), None)
         self.assertIsNotNone(system_cat, "system category missing")
         field_keys = {f["key"] for f in system_cat["fields"]}
         self.assertIn("MARKET_REVIEW_COLOR_SCHEME", field_keys)
+        self.assertIn("DAILY_MARKET_CONTEXT_ENABLED", field_keys)
 
 
 if __name__ == "__main__":
