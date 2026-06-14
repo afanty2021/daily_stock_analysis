@@ -278,7 +278,6 @@ class PortfolioRepository:
         action_type: str,
         cash_dividend_per_share: Optional[float] = None,
         split_ratio: Optional[float] = None,
-        bonus_quantity: Optional[float] = None,
         note: Optional[str] = None,
     ) -> PortfolioCorporateAction:
         with self.portfolio_write_session() as session:
@@ -292,7 +291,6 @@ class PortfolioRepository:
                 action_type=action_type,
                 cash_dividend_per_share=cash_dividend_per_share,
                 split_ratio=split_ratio,
-                bonus_quantity=bonus_quantity,
                 note=note,
             )
             session.expunge(row)

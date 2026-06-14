@@ -850,6 +850,91 @@ class DecisionSignalRecord(Base):
     )
 
 
+class StockNameCache(Base):
+    """
+    股票名称缓存表（P0 读/写）。
+
+    缓存股票中文名称，避免每次从数据源重复获取。
+    股票名称是静态数据，很少变更，缓存有效期 30 天。
+    """
+    __tablename__ = 'stock_name_cache'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # 股票代码（标准化后的代码，如 600519, HK00700, AAPL）
+    symbol = Column(String(20), nullable=False, index=True)
+
+    # 股票中文名称
+    name = Column(String(100), nullable=False)
+
+    # 市场标识（cn/hk/us），用于判断名称来源可靠性
+    market = Column(String(10))
+
+    # 数据源（tushare/akshare/efinance/pytdx/baostock/yfinance/static_map）
+    source = Column(String(32))
+
+    # 缓存过期时间（30 天）
+    expires_at = Column(DateTime, nullable=False)
+
+    # 更新时间
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    # 唯一约束：同一股票代码只能有一条缓存记录
+    __table_args__ = (
+        UniqueConstraint('symbol', name='uix_stock_name_symbol'),
+    )
+
+    def __repr__(self) -> str:
+        return f"<StockNameCache(symbol={self.symbol}, name={self.name})>"
+
+    @classmethod
+    def is_expired(cls, record: 'StockNameCache') -> bool:
+        """检查缓存记录是否过期"""
+        if record.expires_at is None:
+            return True
+        return datetime.now() > record.expires_at
+
+
+class ForecastRecord(Base):
+    """预测记录表 - 存储每次 TimesFM 预测的原始数据"""
+    __tablename__ = 'forecast_records'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query_id = Column(String(64), nullable=False, index=True)
+    stock_code = Column(String(16), nullable=False, index=True)
+    stock_name = Column(String(64), nullable=True)
+    prediction_date = Column(DateTime, default=datetime.now, nullable=False)
+    current_price = Column(Float, nullable=False)
+    point_forecast = Column(Text, nullable=False)  # JSON array string
+    quantile_forecast = Column(Text, nullable=True)  # JSON 2D array string
+    horizon = Column(Integer, nullable=False, default=60)
+    context_length = Column(Integer, nullable=False)
+    model_version = Column(String(32), nullable=True)
+    trend_direction = Column(String(16), nullable=True)  # up/down/sideways/flat
+    evaluated = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ForecastRecord(id={self.id}, stock_code={self.stock_code}, prediction_date={self.prediction_date})>"
+
+
+class ForecastEvaluation(Base):
+    """预测评估表 - 存储预测与实际对比结果"""
+    __tablename__ = 'forecast_evaluations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    forecast_record_id = Column(Integer, ForeignKey('forecast_records.id'), nullable=False, index=True)
+    actual_prices = Column(Text, nullable=False)  # JSON array string
+    mae = Column(Float, nullable=True)
+    mape = Column(Float, nullable=True)
+    rmse = Column(Float, nullable=True)
+    direction_correct = Column(Boolean, nullable=True)
+    evaluated_at = Column(DateTime, default=datetime.now, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<ForecastEvaluation(id={self.id}, forecast_record_id={self.forecast_record_id}, mape={self.mape})>"
+
+
 class _DatabaseManagerMeta(type):
     """Serialize DatabaseManager construction across __new__ and __init__."""
 

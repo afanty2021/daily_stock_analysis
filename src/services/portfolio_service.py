@@ -19,11 +19,6 @@ from src.repositories.portfolio_repo import (
     PortfolioRepository,
 )
 
-try:
-    from src.search_service import SearchService
-except ImportError:
-    SearchService = None  # type: ignore[misc, assignment]
-
 logger = logging.getLogger(__name__)
 
 PortfolioBusyError = RepoPortfolioBusyError
@@ -38,20 +33,35 @@ VALID_MARKETS = {"cn", "hk", "us"}
 VALID_COST_METHODS = {"fifo", "avg"}
 VALID_SIDES = {"buy", "sell"}
 VALID_CASH_DIRECTIONS = {"in", "out"}
-VALID_CORPORATE_ACTIONS = {"cash_dividend", "split_adjustment", "bonus_share"}
-
-# 港股名称映射（用于备用数据源无法获取名称时）
-_HK_STOCK_NAMES: Dict[str, str] = {
-    "03800": "协鑫科技",
-    "00883": "中国海洋石油",
-    "00700": "腾讯控股",
-    "09988": "阿里巴巴",
-    "03690": "美团",
-}
+VALID_CORPORATE_ACTIONS = {"cash_dividend", "split_adjustment"}
+PORTFOLIO_FX_REFRESH_DISABLED_REASON = "portfolio_fx_update_disabled"
 
 
 class PortfolioConflictError(Exception):
     """Raised when request conflicts with existing portfolio state."""
+
+
+class PortfolioOversellError(ValueError):
+    """Raised when a sell would exceed the available position quantity."""
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        trade_date: Optional[date],
+        requested_quantity: float,
+        available_quantity: float,
+    ) -> None:
+        self.symbol = symbol
+        self.trade_date = trade_date
+        self.requested_quantity = float(requested_quantity)
+        self.available_quantity = max(0.0, float(available_quantity))
+        date_hint = f" on {trade_date.isoformat()}" if trade_date is not None else ""
+        super().__init__(
+            "Oversell detected for "
+            f"{symbol}{date_hint}: requested={round(self.requested_quantity, 8)}, "
+            f"available={round(self.available_quantity, 8)}"
+        )
 
 
 @dataclass
@@ -164,7 +174,6 @@ class PortfolioService:
         dedup_hash: Optional[str] = None,
         note: Optional[str] = None,
     ) -> Dict[str, Any]:
-        account = self._require_active_account(account_id)
         side_norm = (side or "").strip().lower()
         if side_norm not in VALID_SIDES:
             raise ValueError("side must be buy or sell")
@@ -172,21 +181,22 @@ class PortfolioService:
             raise ValueError("quantity and price must be > 0")
         if fee < 0 or tax < 0:
             raise ValueError("fee and tax must be >= 0")
-
+        symbol_norm = self._normalize_symbol_for_storage(symbol)
+        if not symbol_norm:
+            raise ValueError("symbol is required")
+        trade_uid_norm = (trade_uid or "").strip() or None
+        dedup_hash_norm = (dedup_hash or "").strip() or None
         try:
             with self.repo.portfolio_write_session() as session:
                 account = self._require_active_account_in_session(session=session, account_id=account_id)
                 market_norm = self._normalize_market(market or account.market)
                 currency_norm = self._normalize_currency(currency or self._default_currency_for_market(market_norm))
-                symbol_norm = self._normalize_symbol_for_storage(symbol)
-                if not symbol_norm:
-                    raise ValueError("symbol is required")
                 self._validate_trade_identity(
                     account_id=account_id,
-                    trade_uid=(trade_uid or "").strip() or None,
-                    dedup_hash=(dedup_hash or "").strip() or None,
+                    trade_uid=trade_uid_norm,
+                    dedup_hash=dedup_hash_norm,
                     session=session,
-                )
+                    )
                 if side_norm == "sell":
                     self._validate_sell_quantity(
                         account_id=account_id,
@@ -200,7 +210,7 @@ class PortfolioService:
                 row = self.repo.add_trade_in_session(
                     session=session,
                     account_id=account_id,
-                    trade_uid=(trade_uid or "").strip() or None,
+                    trade_uid=trade_uid_norm,
                     symbol=symbol_norm,
                     market=market_norm,
                     currency=currency_norm,
@@ -211,7 +221,7 @@ class PortfolioService:
                     fee=float(fee),
                     tax=float(tax),
                     note=(note or "").strip() or None,
-                    dedup_hash=(dedup_hash or "").strip() or None,
+                    dedup_hash=dedup_hash_norm,
                 )
                 return {"id": int(row.id)}
         except (DuplicateTradeUidError, DuplicateTradeDedupHashError) as exc:
@@ -227,22 +237,24 @@ class PortfolioService:
         currency: Optional[str] = None,
         note: Optional[str] = None,
     ) -> Dict[str, Any]:
-        account = self._require_active_account(account_id)
         direction_norm = (direction or "").strip().lower()
         if direction_norm not in VALID_CASH_DIRECTIONS:
             raise ValueError("direction must be in or out")
         if amount <= 0:
             raise ValueError("amount must be > 0")
-        currency_norm = self._normalize_currency(currency or account.base_currency)
-        row = self.repo.add_cash_ledger(
-            account_id=account_id,
-            event_date=event_date,
-            direction=direction_norm,
-            amount=float(amount),
-            currency=currency_norm,
-            note=(note or "").strip() or None,
-        )
-        return {"id": row.id}
+        with self.repo.portfolio_write_session() as session:
+            account = self._require_active_account_in_session(session=session, account_id=account_id)
+            currency_norm = self._normalize_currency(currency or account.base_currency)
+            row = self.repo.add_cash_ledger_in_session(
+                session=session,
+                account_id=account_id,
+                event_date=event_date,
+                direction=direction_norm,
+                amount=float(amount),
+                currency=currency_norm,
+                note=(note or "").strip() or None,
+            )
+            return {"id": int(row.id)}
 
     def record_corporate_action(
         self,
@@ -255,19 +267,11 @@ class PortfolioService:
         currency: Optional[str] = None,
         cash_dividend_per_share: Optional[float] = None,
         split_ratio: Optional[float] = None,
-        bonus_quantity: Optional[float] = None,
         note: Optional[str] = None,
     ) -> Dict[str, Any]:
-        account = self._require_active_account(account_id)
         action_type_norm = (action_type or "").strip().lower()
         if action_type_norm not in VALID_CORPORATE_ACTIONS:
-            raise ValueError("action_type must be cash_dividend, split_adjustment, or bonus_share")
-
-        market_norm = self._normalize_market(market or account.market)
-        currency_norm = self._normalize_currency(currency or self._default_currency_for_market(market_norm))
-        symbol_norm = canonical_stock_code(symbol)
-        if not symbol_norm:
-            raise ValueError("symbol is required")
+            raise ValueError("action_type must be cash_dividend or split_adjustment")
 
         if action_type_norm == "cash_dividend":
             if cash_dividend_per_share is None or cash_dividend_per_share < 0:
@@ -275,10 +279,6 @@ class PortfolioService:
         if action_type_norm == "split_adjustment":
             if split_ratio is None or split_ratio <= 0:
                 raise ValueError("split_ratio must be > 0 for split_adjustment")
-        if action_type_norm == "bonus_share":
-            if bonus_quantity is None or bonus_quantity <= 0:
-                raise ValueError("bonus_quantity must be > 0 for bonus_share")
-
         with self.repo.portfolio_write_session() as session:
             account = self._require_active_account_in_session(session=session, account_id=account_id)
             market_norm = self._normalize_market(market or account.market)
@@ -286,18 +286,6 @@ class PortfolioService:
             symbol_norm = self._normalize_symbol_for_storage(symbol)
             if not symbol_norm:
                 raise ValueError("symbol is required")
-
-            # 检查是否已存在相同的企业行为记录（防止重复提交）
-            if self.repo.has_corporate_action(
-                account_id=account_id,
-                symbol=symbol_norm,
-                action_type=action_type_norm,
-                effective_date=effective_date,
-            ):
-                raise PortfolioConflictError(
-                    f"Corporate action already exists: {symbol_norm} {action_type_norm} on {effective_date}"
-                )
-
             row = self.repo.add_corporate_action_in_session(
                 session=session,
                 account_id=account_id,
@@ -308,7 +296,6 @@ class PortfolioService:
                 action_type=action_type_norm,
                 cash_dividend_per_share=cash_dividend_per_share,
                 split_ratio=split_ratio,
-                bonus_quantity=bonus_quantity,
                 note=(note or "").strip() or None,
             )
             return {"id": int(row.id)}
@@ -434,7 +421,7 @@ class PortfolioService:
         if action_type is not None and action_type.strip():
             action_norm = action_type.strip().lower()
             if action_norm not in VALID_CORPORATE_ACTIONS:
-                raise ValueError("action_type must be cash_dividend, split_adjustment, or bonus_share")
+                raise ValueError("action_type must be cash_dividend or split_adjustment")
 
         rows, total = self.repo.query_corporate_actions(
             account_id=account_id,
@@ -461,8 +448,6 @@ class PortfolioService:
         account_id: Optional[int] = None,
         as_of: Optional[date] = None,
         cost_method: str = "fifo",
-        use_realtime: bool = False,
-        save_to_db: bool = True,
     ) -> Dict[str, Any]:
         as_of_date = as_of or date.today()
         method = self._normalize_cost_method(cost_method)
@@ -487,28 +472,26 @@ class PortfolioService:
         }
 
         for account in account_rows:
-            account_snapshot = self._replay_account(account=account, as_of_date=as_of_date, cost_method=method, use_realtime=use_realtime)
+            account_snapshot = self._replay_account(account=account, as_of_date=as_of_date, cost_method=method)
 
-            # 只在需要时保存到数据库（避免频繁覆盖快照）
-            if save_to_db:
-                self.repo.replace_positions_lots_and_snapshot(
-                    account_id=account.id,
-                    snapshot_date=as_of_date,
-                    cost_method=method,
-                    base_currency=account.base_currency,
-                    total_cash=account_snapshot["total_cash"],
-                    total_market_value=account_snapshot["total_market_value"],
-                    total_equity=account_snapshot["total_equity"],
-                    unrealized_pnl=account_snapshot["unrealized_pnl"],
-                    realized_pnl=account_snapshot["realized_pnl"],
-                    fee_total=account_snapshot["fee_total"],
-                    tax_total=account_snapshot["tax_total"],
-                    fx_stale=account_snapshot["fx_stale"],
-                    payload=json.dumps(account_snapshot["payload"], ensure_ascii=False),
-                    positions=account_snapshot["positions_cache"],
-                    lots=account_snapshot["lots_cache"],
-                    valuation_currency=account.base_currency,
-                )
+            self.repo.replace_positions_lots_and_snapshot(
+                account_id=account.id,
+                snapshot_date=as_of_date,
+                cost_method=method,
+                base_currency=account.base_currency,
+                total_cash=account_snapshot["total_cash"],
+                total_market_value=account_snapshot["total_market_value"],
+                total_equity=account_snapshot["total_equity"],
+                unrealized_pnl=account_snapshot["unrealized_pnl"],
+                realized_pnl=account_snapshot["realized_pnl"],
+                fee_total=account_snapshot["fee_total"],
+                tax_total=account_snapshot["tax_total"],
+                fx_stale=account_snapshot["fx_stale"],
+                payload=json.dumps(account_snapshot["payload"], ensure_ascii=False),
+                positions=account_snapshot["positions_cache"],
+                lots=account_snapshot["lots_cache"],
+                valuation_currency=account.base_currency,
+            )
 
             accounts_payload.append(account_snapshot["public"])
 
@@ -598,6 +581,8 @@ class PortfolioService:
     ) -> Dict[str, Any]:
         """Refresh account FX pairs online with stale fallback when fetch fails."""
         as_of_date = as_of or date.today()
+        config = get_config()
+        refresh_enabled = bool(getattr(config, "portfolio_fx_update_enabled", True))
         if account_id is not None:
             account_rows = [self._require_active_account(account_id)]
         else:
@@ -606,13 +591,19 @@ class PortfolioService:
         summary = {
             "as_of": as_of_date.isoformat(),
             "account_count": len(account_rows),
+            "refresh_enabled": refresh_enabled,
+            "disabled_reason": None if refresh_enabled else PORTFOLIO_FX_REFRESH_DISABLED_REASON,
             "pair_count": 0,
             "updated_count": 0,
             "stale_count": 0,
             "error_count": 0,
         }
         for account in account_rows:
-            item = self._refresh_account_fx_rates(account=account, as_of_date=as_of_date)
+            item = self._refresh_account_fx_rates(
+                account=account,
+                as_of_date=as_of_date,
+                refresh_enabled=refresh_enabled,
+            )
             summary["pair_count"] += item["pair_count"]
             summary["updated_count"] += item["updated_count"]
             summary["stale_count"] += item["stale_count"]
@@ -820,9 +811,19 @@ class PortfolioService:
                     cash_balances[key[2]] += (gross - fee - tax)
                     proceeds_net = gross - fee - tax
                     if cost_method == "fifo":
-                        cost_basis = self._consume_fifo_lots(fifo_lots[key], qty, key[0], allow_negative=True)
+                        cost_basis = self._consume_fifo_lots(
+                            fifo_lots[key],
+                            qty,
+                            key[0],
+                            event_date,
+                        )
                     else:
-                        cost_basis = self._consume_avg_position(avg_state[key], qty, key[0], allow_negative=True)
+                        cost_basis = self._consume_avg_position(
+                            avg_state[key],
+                            qty,
+                            key[0],
+                            event_date,
+                        )
                     realized_local = proceeds_net - cost_basis
                     realized_base, stale_realized, _ = self._convert_amount(
                         amount=realized_local,
@@ -884,28 +885,6 @@ class PortfolioService:
                     else:
                         state = avg_state[key]
                         state.quantity *= split_ratio
-                elif action_type == "bonus_share":
-                    # 送股：增加持仓数量，不改变单位成本
-                    bonus_qty = float(event.bonus_quantity or 0.0)
-                    if bonus_qty <= 0:
-                        raise ValueError(f"Invalid bonus_quantity for {event.symbol}")
-                    if cost_method == "fifo":
-                        # 送股增加到一个新的 FIFO lot 中
-                        fifo_lots[key].append(
-                            {
-                                "symbol": key[0],
-                                "market": key[1],
-                                "currency": key[2],
-                                "open_date": event_date,
-                                "remaining_quantity": bonus_qty,
-                                "unit_cost": 0.0,  # 送股成本为 0
-                                "source_corporate_action_id": event.id,
-                            }
-                        )
-                    else:
-                        state = avg_state[key]
-                        state.quantity += bonus_qty
-                        # 送股不增加总成本，因此平均成本会摊薄
                 else:
                     raise ValueError(f"Unsupported corporate action type: {event.action_type}")
 
@@ -915,7 +894,6 @@ class PortfolioService:
             cost_method=cost_method,
             fifo_lots=fifo_lots,
             avg_state=avg_state,
-            use_realtime=use_realtime,
         )
         fx_stale = fx_stale or stale_pos
 
@@ -932,13 +910,6 @@ class PortfolioService:
 
         unrealized_pnl_base = market_value_base - total_cost_base
         total_equity_base = total_cash_base + market_value_base
-
-        # 计算每个持仓的占比（占总权益的比例）
-        for pos in position_rows:
-            if total_equity_base > 0:
-                pos["weight"] = round(pos["market_value_base"] / total_equity_base, 6)
-            else:
-                pos["weight"] = 0.0
 
         account_payload = {
             "account_id": account.id,
@@ -983,7 +954,6 @@ class PortfolioService:
         cost_method: str,
         fifo_lots: Dict[Tuple[str, str, str], List[Dict[str, Any]]],
         avg_state: Dict[Tuple[str, str, str], _AvgState],
-        use_realtime: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], float, float, bool]:
         position_rows: List[Dict[str, Any]] = []
         lot_rows: List[Dict[str, Any]] = []
@@ -991,41 +961,12 @@ class PortfolioService:
         total_cost_base = 0.0
         fx_stale = False
 
-        # 股票名称缓存
-        stock_names: Dict[str, str] = {}
-
         keys: Iterable[Tuple[str, str, str]]
         if cost_method == "fifo":
             keys = list(fifo_lots.keys())
         else:
             keys = list(avg_state.keys())
 
-        # ========== 批量获取股票名称（优化性能）==========
-        # 收集所有需要获取名称的股票代码
-        all_symbols = list({key[0] for key in keys})
-        if all_symbols:
-            # 优先从数据库批量读取
-            stock_names = self.repo.get_stock_names_batch(all_symbols)
-
-        # 对于数据库中没有的股票，使用港股备用名称映射
-        _HK_STOCK_NAMES: Dict[str, str] = {
-            "00883": "中国海洋石油",
-            "03800": "协鑫科技",
-        }
-
-        # ========== 并行获取实时价格（优化性能）==========
-        realtime_prices: Dict[str, float] = {}
-        if use_realtime:
-            # 收集所有需要获取实时价格的股票代码（包括ETF）
-            symbols_to_fetch = []
-            for key in keys:
-                symbol, _, _ = key
-                symbols_to_fetch.append(symbol)
-
-            if symbols_to_fetch:
-                realtime_prices = self._fetch_realtime_prices_parallel(symbols_to_fetch)
-
-        # ========== 构建持仓数据 ==========
         for key in sorted(keys):
             symbol, market, currency = key
 
@@ -1084,19 +1025,9 @@ class PortfolioService:
             if abs(cost_base) > EPS:
                 unrealized_pct = unrealized_base / cost_base * 100.0
 
-            # 股票名称：使用批量查询的结果，如果数据库中没有则使用港股备用名称
-            stock_name = stock_names.get(symbol, _HK_STOCK_NAMES.get(symbol, ""))
-
-            # 判断是否为 ETF
-            is_etf = False
-            if SearchService is not None:
-                is_etf = SearchService.is_index_or_etf(symbol, stock_name)
-
             position_rows.append(
                 {
                     "symbol": symbol,
-                    "name": stock_name,  # 使用批量查询的股票名称
-                    "is_etf": is_etf,  # 添加 ETF 标识
                     "market": market,
                     "currency": currency,
                     "quantity": round(qty, 8),
@@ -1293,15 +1224,22 @@ class PortfolioService:
         return values
 
     @staticmethod
-    def _consume_fifo_lots(lots: List[Dict[str, Any]], quantity: float, symbol: str, allow_negative: bool = False) -> float:
+    def _consume_fifo_lots(
+        lots: List[Dict[str, Any]],
+        quantity: float,
+        symbol: str,
+        trade_date: Optional[date] = None,
+    ) -> float:
         remaining = quantity
         cost_basis = 0.0
         while remaining > EPS:
             if not lots:
-                if allow_negative:
-                    # 允许负持仓（用于导入不完整历史数据）
-                    return cost_basis
-                raise ValueError(f"Oversell detected for {symbol}")
+                raise PortfolioOversellError(
+                    symbol=symbol,
+                    trade_date=trade_date,
+                    requested_quantity=quantity,
+                    available_quantity=quantity - remaining,
+                )
             head = lots[0]
             take = min(remaining, float(head["remaining_quantity"]))
             cost_basis += take * float(head["unit_cost"])
@@ -1312,13 +1250,27 @@ class PortfolioService:
         return cost_basis
 
     @staticmethod
-    def _consume_avg_position(state: _AvgState, quantity: float, symbol: str, allow_negative: bool = False) -> float:
-        if not allow_negative:
-            if state.quantity + EPS < quantity:
-                raise ValueError(f"Oversell detected for {symbol}")
-            if state.quantity <= EPS:
-                raise ValueError(f"Oversell detected for {symbol}")
-        avg_cost = state.total_cost / state.quantity if state.quantity > EPS else 0.0
+    def _consume_avg_position(
+        state: _AvgState,
+        quantity: float,
+        symbol: str,
+        trade_date: Optional[date] = None,
+    ) -> float:
+        if state.quantity + EPS < quantity:
+            raise PortfolioOversellError(
+                symbol=symbol,
+                trade_date=trade_date,
+                requested_quantity=quantity,
+                available_quantity=state.quantity,
+            )
+        if state.quantity <= EPS:
+            raise PortfolioOversellError(
+                symbol=symbol,
+                trade_date=trade_date,
+                requested_quantity=quantity,
+                available_quantity=0.0,
+            )
+        avg_cost = state.total_cost / state.quantity
         cost_basis = avg_cost * quantity
         state.quantity -= quantity
         state.total_cost -= cost_basis
@@ -1389,64 +1341,90 @@ class PortfolioService:
             as_of_date=as_of_date,
         )
 
-    def _refresh_account_fx_rates(self, *, account: Any, as_of_date: date) -> Dict[str, int]:
-        """Refresh FX pairs for one account and keep stale fallback on failures."""
-        config = get_config()
-        if not getattr(config, "portfolio_fx_update_enabled", True):
-            return {"pair_count": 0, "updated_count": 0, "stale_count": 0, "error_count": 0}
-
+    def _list_account_refresh_fx_currencies(
+        self,
+        *,
+        account: Any,
+        as_of_date: date,
+        strict: bool = True,
+    ) -> List[str]:
+        """Return distinct non-base currencies participating in refresh for one account."""
         base_currency = self._normalize_currency(account.base_currency)
         currencies: Set[str] = set()
-        for row in self.repo.list_trades(account.id, as_of=as_of_date):
-            currencies.add(self._normalize_currency(row.currency))
-        for row in self.repo.list_cash_ledger(account.id, as_of=as_of_date):
-            currencies.add(self._normalize_currency(row.currency))
-
-        summary = {"pair_count": 0, "updated_count": 0, "stale_count": 0, "error_count": 0}
-        for from_currency in sorted(currencies):
-            if from_currency == base_currency:
+        rows = list(self.repo.list_trades(account.id, as_of=as_of_date))
+        rows.extend(self.repo.list_cash_ledger(account.id, as_of=as_of_date))
+        for row in rows:
+            try:
+                currency = self._normalize_currency(row.currency)
+            except ValueError:
+                if strict:
+                    raise
+                logger.warning(
+                    "Skip invalid FX refresh currency for account %s on %s: %r",
+                    account.id,
+                    as_of_date.isoformat(),
+                    getattr(row, "currency", None),
+                )
                 continue
-            summary["pair_count"] += 1
+            if currency != base_currency:
+                currencies.add(currency)
+        return sorted(currencies)
 
-            # 优先使用新浪财经获取实时汇率
-            rate = self._fetch_fx_rate_from_sina(
-                from_currency=from_currency,
-                to_currency=base_currency,
-            )
-            source = "sina"
+    def _refresh_account_fx_rates(
+        self,
+        *,
+        account: Any,
+        as_of_date: date,
+        refresh_enabled: bool,
+    ) -> Dict[str, int]:
+        """Refresh FX pairs for one account and keep stale fallback on failures."""
+        refresh_currencies = self._list_account_refresh_fx_currencies(
+            account=account,
+            as_of_date=as_of_date,
+            strict=refresh_enabled,
+        )
+        if not refresh_enabled:
+            return {
+                "pair_count": len(refresh_currencies),
+                "updated_count": 0,
+                "stale_count": 0,
+                "error_count": 0,
+            }
 
-            # 如果新浪财经失败，尝试 YFinance
-            if rate is None or rate <= 0:
-                try:
-                    rate = self._fetch_fx_rate_from_yfinance(
-                        from_currency=from_currency,
-                        to_currency=base_currency,
-                        as_of_date=as_of_date,
-                    )
-                    source = "yfinance"
-                except Exception as exc:
-                    logger.warning(
-                        "FX online fetch failed for %s/%s on %s: %s",
-                        from_currency,
-                        base_currency,
-                        as_of_date.isoformat(),
-                        exc,
-                    )
-                    rate = None
-
-            if rate is not None and rate > 0:
-                self.repo.save_fx_rate(
+        base_currency = self._normalize_currency(account.base_currency)
+        summary = {
+            "pair_count": len(refresh_currencies),
+            "updated_count": 0,
+            "stale_count": 0,
+            "error_count": 0,
+        }
+        for from_currency in refresh_currencies:
+            try:
+                rate = self._fetch_fx_rate_from_yfinance(
                     from_currency=from_currency,
                     to_currency=base_currency,
-                    rate_date=as_of_date,
-                    rate=rate,
-                    source=source,
-                    is_stale=False,
+                    as_of_date=as_of_date,
                 )
-                summary["updated_count"] += 1
-                continue
+                if rate is not None and rate > 0:
+                    self.repo.save_fx_rate(
+                        from_currency=from_currency,
+                        to_currency=base_currency,
+                        rate_date=as_of_date,
+                        rate=rate,
+                        source="yfinance",
+                        is_stale=False,
+                    )
+                    summary["updated_count"] += 1
+                    continue
+            except Exception as exc:
+                logger.warning(
+                    "FX online fetch failed for %s/%s on %s: %s",
+                    from_currency,
+                    base_currency,
+                    as_of_date.isoformat(),
+                    exc,
+                )
 
-            # 如果都失败，尝试使用缓存的过期汇率
             fallback = self.repo.get_latest_fx_rate(
                 from_currency=from_currency,
                 to_currency=base_currency,
@@ -1494,80 +1472,41 @@ class PortfolioService:
             return None
         return value
 
-    @staticmethod
-    def _fetch_fx_rate_from_sina(
-        *,
-        from_currency: str,
-        to_currency: str,
-    ) -> Optional[float]:
-        """
-        从中国外汇交易中心获取实时汇率（通过 akshare）
-
-        支持的主要汇率对：
-        - USD/CNY (美元/人民币)
-        - HKD/CNY (港币/人民币)
-        - EUR/CNY (欧元/人民币)
-        - GBP/CNY (英镑/人民币)
-        - JPY/CNY (日元/人民币)
-        - AUD/CNY (澳元/人民币)
-        - CAD/CNY (加元/人民币)
-        """
-        try:
-            import akshare as ak
-
-            # 获取所有人民币外汇即期报价
-            df = ak.fx_spot_quote()
-            if df is None or df.empty:
-                return None
-
-            # 标准化货币代码
-            from_norm = from_currency.upper()
-            to_norm = to_currency.upper()
-
-            # 查找目标货币对
-            fx_pair = f"{from_norm}/{to_norm}"
-            row = df[df['货币对'] == fx_pair]
-
-            if not row.empty:
-                # 使用中间价：(买报价 + 卖报价) / 2
-                buy_price = float(row.iloc[0]['买报价'])
-                sell_price = float(row.iloc[0]['卖报价'])
-                mid_rate = (buy_price + sell_price) / 2.0
-
-                if mid_rate > 0:
-                    logger.info(f"[外汇交易中心] {fx_pair}: {mid_rate:.4f}")
-                    return mid_rate
-
-            # 尝试反向汇率（如果目标货币是人民币）
-            if to_norm == "CNY":
-                reverse_fx_pair = f"{to_norm}/{from_norm}"
-                row = df[df['货币对'] == reverse_fx_pair]
-
-                if not row.empty:
-                    buy_price = float(row.iloc[0]['买报价'])
-                    sell_price = float(row.iloc[0]['卖报价'])
-                    mid_rate = (buy_price + sell_price) / 2.0
-
-                    if mid_rate > 0:
-                        # 反向汇率需要取倒数
-                        inverse_rate = 1.0 / mid_rate
-                        logger.info(f"[外汇交易中心] {fx_pair}: {inverse_rate:.4f} (反向汇率)")
-                        return inverse_rate
-
-            return None
-
-        except ImportError:
-            logger.warning("akshare 未安装，无法使用外汇交易中心获取汇率")
-            return None
-        except Exception as exc:
-            logger.warning(f"外汇交易中心获取汇率失败 {from_currency}/{to_currency}: {exc}")
-            return None
-
     def _require_active_account(self, account_id: int) -> Any:
         account = self.repo.get_account(account_id, include_inactive=False)
         if account is None:
             raise ValueError(f"Active account not found: {account_id}")
         return account
+
+    def _require_active_account_in_session(self, *, session: Any, account_id: int) -> Any:
+        account = self.repo.get_account_in_session(
+            session=session,
+            account_id=account_id,
+            include_inactive=False,
+        )
+        if account is None:
+            raise ValueError(f"Active account not found: {account_id}")
+        return account
+
+    def _has_trade_uid(self, *, account_id: int, trade_uid: str, session: Optional[Any] = None) -> bool:
+        if session is None:
+            return self.repo.has_trade_uid(account_id, trade_uid)
+        return self.repo.has_trade_uid_in_session(session=session, account_id=account_id, trade_uid=trade_uid)
+
+    def _has_trade_dedup_hash(
+        self,
+        *,
+        account_id: int,
+        dedup_hash: str,
+        session: Optional[Any] = None,
+    ) -> bool:
+        if session is None:
+            return self.repo.has_trade_dedup_hash(account_id, dedup_hash)
+        return self.repo.has_trade_dedup_hash_in_session(
+            session=session,
+            account_id=account_id,
+            dedup_hash=dedup_hash,
+        )
 
     @staticmethod
     def _account_to_dict(row: Any) -> Dict[str, Any]:
