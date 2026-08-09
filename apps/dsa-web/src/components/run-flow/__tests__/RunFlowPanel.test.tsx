@@ -285,6 +285,8 @@ describe('RunFlowPanel', () => {
 
     expect(await screen.findByTestId('run-flow-panel')).toBeInTheDocument();
     expect(screen.getByText('贵州茅台运行流')).toBeInTheDocument();
+    expect(screen.getByTestId('run-flow-layout')).toHaveClass('xl:grid-cols-[minmax(0,1fr)_19.25rem]');
+    expect(screen.getByTestId('run-flow-events-column')).toHaveClass('xl:max-h-[calc(100vh-18rem)]');
     expect(screen.getByTestId('run-flow-graph')).toBeInTheDocument();
     expect(screen.getByTestId('run-flow-events')).toBeInTheDocument();
     expect(await screen.findByTestId('run-flow-node-details')).toHaveTextContent('新闻舆情');
@@ -294,7 +296,7 @@ describe('RunFlowPanel', () => {
     expect(screen.getByTestId('run-flow-node-details')).toHaveTextContent('LLM 生成');
     expect(screen.getByTestId('run-flow-node-details')).toHaveTextContent('DeepSeek');
 
-    fireEvent.click(screen.getByRole('button', { name: '新闻舆情 节点，状态 Fallback' }));
+    fireEvent.click(screen.getByRole('button', { name: '新闻舆情 节点，状态 降级回退' }));
 
     expect(screen.getByTestId('run-flow-node-details')).toHaveTextContent('fallbackFrom');
     expect(screen.getByTestId('run-flow-node-details')).toHaveTextContent('Tushare');
@@ -332,7 +334,7 @@ describe('RunFlowPanel', () => {
 
     expect(await screen.findByTestId('run-flow-node-details')).toHaveTextContent('新闻舆情');
     expect(screen.getByText('保存')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '新闻舆情 节点，状态 Fallback' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: '新闻舆情 节点，状态 降级回退' })).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('expands provider attempt groups from node details', async () => {
@@ -350,6 +352,92 @@ describe('RunFlowPanel', () => {
     expect(screen.getByRole('button', { name: '收起尝试' })).toBeInTheDocument();
   });
 
+  it('renders TickFlow realtime fallback attempts through generic provider groups', async () => {
+    const tickFlowProviderAttemptSnapshot: RunFlowSnapshot = {
+      ...snapshot,
+      nodes: [
+        {
+          id: 'task_queue',
+          lane: 'entry',
+          kind: 'queue',
+          label: 'Task queue',
+          status: 'success',
+        },
+        {
+          id: 'provider_realtime_quote_tickflowfetcher_1',
+          lane: 'data_source',
+          kind: 'data_source',
+          label: '实时行情 · TickFlowFetcher',
+          provider: 'TickFlowFetcher',
+          status: 'failed',
+          durationMs: 892,
+          metadata: { data_type: 'realtime_quote', attempt: 1 },
+        },
+        {
+          id: 'provider_realtime_quote_aksharefetcher_2',
+          lane: 'data_source',
+          kind: 'data_source',
+          label: '实时行情 · AkshareFetcher',
+          provider: 'AkshareFetcher',
+          status: 'success',
+          durationMs: 8700,
+          recordCount: 1,
+          metadata: { data_type: 'realtime_quote', attempt: 2 },
+        },
+        {
+          id: 'context_pack',
+          lane: 'analysis',
+          kind: 'analysis',
+          label: 'ContextPack',
+          status: 'success',
+        },
+      ],
+      edges: [
+        {
+          id: 'queue-quote-1',
+          from: 'task_queue',
+          to: 'provider_realtime_quote_tickflowfetcher_1',
+          kind: 'control',
+          status: 'failed',
+        },
+        {
+          id: 'quote-1-quote-2',
+          from: 'provider_realtime_quote_tickflowfetcher_1',
+          to: 'provider_realtime_quote_aksharefetcher_2',
+          kind: 'fallback',
+          status: 'success',
+        },
+        {
+          id: 'quote-context',
+          from: 'provider_realtime_quote_aksharefetcher_2',
+          to: 'context_pack',
+          kind: 'data',
+          status: 'success',
+        },
+      ],
+      events: [],
+    };
+
+    vi.mocked(analysisApi.getTaskFlow).mockResolvedValue(tickFlowProviderAttemptSnapshot);
+
+    render(<RunFlowPanel source={{ type: 'task', taskId: 'task-1' }} />);
+
+    const group = await screen.findByTestId('run-flow-node-topology_data_realtime_quote');
+    expect(group).toHaveTextContent('TickFlowFetcher -> AkshareFetcher');
+    expect(screen.queryByTestId('run-flow-node-provider_realtime_quote_tickflowfetcher_1')).not.toBeInTheDocument();
+
+    const details = await screen.findByTestId('run-flow-node-details');
+    expect(details).toHaveTextContent('TickFlowFetcher -> AkshareFetcher');
+    expect(details).toHaveTextContent('TickFlowFetcher');
+    expect(details).toHaveTextContent('AkshareFetcher');
+
+    fireEvent.click(screen.getByTestId('run-flow-node-topology_data_realtime_quote-toggle'));
+
+    expect(await screen.findByTestId('run-flow-node-provider_realtime_quote_tickflowfetcher_1')).toBeInTheDocument();
+    expect(await screen.findByTestId('run-flow-node-provider_realtime_quote_aksharefetcher_2')).toBeInTheDocument();
+    expect(screen.getByTestId('run-flow-node-provider_realtime_quote_tickflowfetcher_1')).toHaveTextContent('TickFlowFetcher');
+    expect(screen.getByTestId('run-flow-node-provider_realtime_quote_aksharefetcher_2')).toHaveTextContent('AkshareFetcher');
+  });
   it('hides topology summary metadata from aggregated node details', async () => {
     vi.mocked(analysisApi.getTaskFlow).mockResolvedValue(providerAttemptSnapshot);
 

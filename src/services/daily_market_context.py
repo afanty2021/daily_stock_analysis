@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -17,6 +18,10 @@ from src.core.market_review_lock import (
     try_acquire_market_review_lock,
 )
 from src.report_language import normalize_report_language
+from src.services.run_diagnostics import (
+    activate_run_diagnostic_context,
+    reset_run_diagnostic_context,
+)
 from src.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -25,9 +30,10 @@ MARKET_REVIEW_HISTORY_CODE = "MARKET"
 MARKET_REVIEW_REPORT_TYPE = "market_review"
 
 
-_REGION_LABEL_ZH = {"cn": "A股", "hk": "港股", "us": "美股"}
-_REGION_LABEL_EN = {"cn": "A-share", "hk": "HK", "us": "US"}
+_REGION_LABEL_ZH = {"cn": "A股", "hk": "港股", "us": "美股", "jp": "日股", "kr": "韩股"}
+_REGION_LABEL_EN = {"cn": "A-share", "hk": "HK", "us": "US", "jp": "Japan", "kr": "Korea"}
 _VALID_REGIONS = frozenset(_REGION_LABEL_ZH)
+_LEGACY_BOTH_REGIONS = frozenset({"cn", "hk", "us"})
 _UNTRUSTED_MARKET_SUMMARY_SENTINELS = (
     "BEGIN_UNTRUSTED_MARKET_SUMMARY",
     "END_UNTRUSTED_MARKET_SUMMARY",
@@ -109,7 +115,13 @@ class DailyMarketContextService:
         current_query_id: Optional[str] = None,
         require_query_id_match: bool = False,
     ) -> Optional[DailyMarketContext]:
-        normalized_region = _normalize_region(region)
+        normalized_region = _normalize_context_region(region)
+        if normalized_region is None:
+            logger.info(
+                "跳过多市场或不支持区域的大盘上下文复用: region=%s",
+                region,
+            )
+            return None
         context_date = target_date or self._today_fn()
         report_language = normalize_report_language(getattr(config, "report_language", "zh"))
         cache_key = self._cache_key(
@@ -413,23 +425,39 @@ class DailyMarketContextService:
                 persist_market_review_history=persist_market_review_history,
             )
 
+        caller_query_id = (
+            current_query_id.strip()
+            if isinstance(current_query_id, str) and current_query_id.strip()
+            else None
+        )
+        market_context_query_id = (
+            f"market_context_{caller_query_id}_{region}"
+            if caller_query_id
+            else f"market_context_{uuid.uuid4().hex}_{region}"
+        )
+
+        diagnostic_token = None
         try:
+            diagnostic_token = activate_run_diagnostic_context(
+                trace_id=market_context_query_id,
+                query_id=market_context_query_id,
+                stock_code=MARKET_REVIEW_HISTORY_CODE,
+                trigger_source="daily_market_context",
+                scope="daily_market_context",
+            )
             result = run_market_review(
                 config=config,
                 notifier=notifier,
                 analyzer=analyzer,
                 search_service=search_service,
-                query_id=(
-                    current_query_id.strip()
-                    if isinstance(current_query_id, str) and current_query_id.strip()
-                    else None
-                ),
+                query_id=market_context_query_id,
                 send_notification=False,
                 merge_notification=False,
                 override_region=region,
                 return_structured=True,
                 save_report_file=False,
                 persist_history=persist_market_review_history,
+                trigger_source="daily_market_context",
             )
 
             if (
@@ -451,11 +479,7 @@ class DailyMarketContextService:
                 source="market_review_runtime",
                 fallback_summary=fallback_summary,
                 fallback_full_report=fallback_summary,
-                query_id=(
-                    current_query_id.strip()
-                    if isinstance(current_query_id, str) and current_query_id.strip()
-                    else None
-                ),
+                query_id=caller_query_id,
             )
         except Exception as exc:
             logger.warning(
@@ -465,6 +489,8 @@ class DailyMarketContextService:
             )
             return None
         finally:
+            if diagnostic_token is not None:
+                reset_run_diagnostic_context(diagnostic_token)
             if owns_lock:
                 release_market_review_lock(lock_token)
 
@@ -633,7 +659,7 @@ def format_daily_market_context_prompt_section(
     position_cap = str(payload.get("position_cap") or "").strip()
     source = str(payload.get("source") or "").strip()
 
-    if language == "en":
+    if language in ("en", "ko"):
         label = _REGION_LABEL_EN.get(region, region)
         lines = [
             "\n## Daily Market Context",
@@ -685,6 +711,13 @@ def _escape_untrusted_market_summary_sentinels(summary: str) -> str:
 def _normalize_region(region: str) -> str:
     normalized = str(region or "cn").strip().lower()
     return normalized if normalized in _VALID_REGIONS else "cn"
+
+
+def _normalize_context_region(region: str) -> Optional[str]:
+    normalized = str(region or "cn").strip().lower()
+    if normalized in _VALID_REGIONS:
+        return normalized
+    return None
 
 
 def _loads_mapping(value: Any) -> Dict[str, Any]:
@@ -827,7 +860,7 @@ def _region_matches(value: Any, region: str) -> bool:
         return False
     text = str(value).strip().lower()
     if text == "both":
-        return True
+        return region in _LEGACY_BOTH_REGIONS
     parts = {item.strip() for item in text.split(",") if item.strip()}
     return region in parts
 
